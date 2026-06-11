@@ -1,0 +1,18 @@
+# OSS release scanner allowlist
+#
+# One substring per line. Any flagged line that CONTAINS one of these substrings
+# is downgraded to "allowlisted" and will not fail the gate.
+#
+# Use this ONLY for confirmed false positives or intentionally-public strings.
+# Do NOT use it to silence real internal info — fix the source instead.
+#
+# Review every addition: an over-broad token here defeats the gate.
+
+# --- Examples (uncomment / adapt per release) ---------------------------------
+# example@example.com          # placeholder email used in docs
+# 10.0.0.0                     # documented CIDR example, not a real host
+
+# --- Confirmed-OK public strings ---------------------------------------------
+# Author attribution in the LICENSE copyright line (intentional, public):
+Copyright (c) 2025-2026 Dr. Boyuan (Keven) Guan, FIU Library & GIS Center
+bguan@fiu.edu

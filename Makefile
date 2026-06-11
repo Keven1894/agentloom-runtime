@@ -13,5 +13,9 @@ test:
 	python -m pytest -q
 
 scan:
-	python ../../envistor-data/Scripts/oss_release/scan_internal_info.py . \
-		--allowlist ../../envistor-data/Scripts/oss_release/allowlist.txt
+	python scripts/oss_release/scan_internal_info.py src \
+		--allowlist scripts/oss_release/allowlist.txt
+	python scripts/oss_release/scan_internal_info.py migrations \
+		--allowlist scripts/oss_release/allowlist.txt
+	python scripts/oss_release/scan_internal_info.py tests \
+		--allowlist scripts/oss_release/allowlist.txt
