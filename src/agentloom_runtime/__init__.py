@@ -1,6 +1,7 @@
 """AgentLoom Runtime — production-side memory and retrieval for deployed agents."""
 
 from agentloom_runtime.db import DatabaseSettings, connect, get_database_settings
+from agentloom_runtime.fair import FAIRCalculator, calculate_fair_compliance
 from agentloom_runtime.kg import search_kg
 from agentloom_runtime.memory import (
     reciprocal_rank_fusion,
@@ -10,6 +11,8 @@ from agentloom_runtime.memory import (
 
 __all__ = [
     "DatabaseSettings",
+    "FAIRCalculator",
+    "calculate_fair_compliance",
     "connect",
     "get_database_settings",
     "reciprocal_rank_fusion",
