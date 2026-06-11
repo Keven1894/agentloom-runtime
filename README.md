@@ -10,10 +10,43 @@ propose-review-accept, Tier-A validators), **AgentLoom Runtime** is the
 production-side companion: how a deployed agent *remembers*, *retrieves*, and
 keeps its knowledge faithful to what was authored.
 
-> **Status:** documentation-first release. The architecture and design
-> decisions are published here as reusable patterns. Runtime code modules
-> (KG sync, retrieval, RRF fusion) are being extracted and scrubbed in
-> subsequent releases.
+> **Status:** early library release (v0.1.0). The `agentloom_runtime.db` module
+> is installable today; memory and KG sync modules are landing next.
+
+## Quickstart
+
+```bash
+git clone https://github.com/Keven1894/agentloom-runtime.git
+cd agentloom-runtime
+python -m venv .venv
+
+# Windows
+.venv\Scripts\pip install -e .[dev]
+.venv\Scripts\python -m pytest -q
+
+# macOS/Linux
+# source .venv/bin/activate && pip install -e .[dev] && pytest -q
+```
+
+Configure MySQL via environment variables:
+
+```bash
+export AGENTLOOM_DB_HOST=127.0.0.1
+export AGENTLOOM_DB_NAME=app_db
+export AGENTLOOM_DB_USER=runtime
+export AGENTLOOM_DB_PASSWORD=...
+# or: export DATABASE_URL=mysql://runtime:...@127.0.0.1:3306/app_db
+```
+
+```python
+from agentloom_runtime.db import connect
+
+with connect() as conn:
+    row = conn.execute("SELECT 1 AS ok").fetchone()
+    assert row["ok"] == 1
+```
+
+Or with Make: `make install && make test`
 
 ## Why this exists
 

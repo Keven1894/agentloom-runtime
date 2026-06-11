@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentloom-runtime"
+version = "0.1.0"
+description = "Production runtime library for AgentLoom agents: layered memory, graph-first retrieval, and file-to-database KG sync."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Boyuan (Keven) Guan", email = "bguan@fiu.edu" },
+]
+keywords = [
+    "agentic-ai",
+    "knowledge-graphs",
+    "retrieval",
+    "memory",
+    "mcp",
+]
+dependencies = [
+    "numpy>=1.26,<3",
+    "pymysql>=1.1,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+]
+embeddings = [
+    "openai>=1.0,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Keven1894/agentloom-runtime"
+Repository = "https://github.com/Keven1894/agentloom-runtime"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
