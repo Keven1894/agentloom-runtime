@@ -36,5 +36,7 @@ jobs:
         run: |
           python scripts/oss_release/scan_internal_info.py src \
             --allowlist scripts/oss_release/allowlist.txt
-          python scripts/oss_release/scan_internal_info.py migrations tests \
+          python scripts/oss_release/scan_internal_info.py migrations \
+            --allowlist scripts/oss_release/allowlist.txt
+          python scripts/oss_release/scan_internal_info.py tests \
             --allowlist scripts/oss_release/allowlist.txt
