@@ -39,12 +39,25 @@ retrieval pipeline that serves them.
 
 ## Relationship to the ecosystem
 
-- **[AgentLoom](https://github.com/Keven1894/AgentLoom)** — builder-side
-  framework: knowledge-graph governance, validators, propose-review-accept.
-- **[co-agenticOS](https://github.com/Keven1894/co-agenticOS)** — governance /
-  safety layer: rules, coordination, memory boundaries, verification.
-- **AgentLoom Runtime** (this repo) — production-side memory + retrieval
-  patterns that an AgentLoom-built agent uses at runtime.
+Four repos, four roles — split by *what they are* and by *agent lifecycle phase*:
+
+| Repo | Role | Lifecycle phase |
+|------|------|-----------------|
+| [**co-agenticOS**](https://github.com/Keven1894/co-agenticOS) | Governance **spec** — rules, coordination, memory boundaries, verification | sets the rules |
+| [**AgentLoom**](https://github.com/Keven1894/AgentLoom) | Build **framework** — knowledge-graph governance, validators, propose-review-accept | **authoring time** (build & govern the agent) |
+| **AgentLoom Runtime** (this repo) | Runtime **library** — layered memory, graph-first retrieval, file→DB sync | **run time** (the deployed agent remembers & retrieves) |
+| [**ucgis-agentloom-2026-workshop**](https://github.com/Keven1894/ucgis-agentloom-2026-workshop) | A concrete **instance** — a worked, forkable example built on the framework | a use of all of the above |
+
+In one line:
+
+> **co-agenticOS** sets the rules → **AgentLoom** is the framework you build and
+> govern an agent with (authoring time) → **AgentLoom Runtime** is the library the
+> deployed agent uses to remember and retrieve (run time) → the **workshop** repo
+> is one concrete instance that puts all of them to work.
+
+The key boundary is **AgentLoom (authoring time) vs AgentLoom Runtime (run
+time)**: AgentLoom is how you *build and govern* an agent's knowledge; this repo
+is what the agent *uses while running in production*.
 
 ## License
 
