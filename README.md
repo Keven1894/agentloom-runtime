@@ -180,6 +180,10 @@ The key boundary is **AgentLoom (authoring time) vs AgentLoom Runtime (run
 time)**: AgentLoom is how you *build and govern* an agent's knowledge; this repo
 is what the agent *uses while running in production*.
 
+## Contributing
+
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md). Report bugs or request features via [GitHub Issues](https://github.com/Keven1894/agentloom-runtime/issues/new/choose).
+
 ## License
 
 Code: [MIT](LICENSE). Documentation and design content may be reused under the

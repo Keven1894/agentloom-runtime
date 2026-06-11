@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: AgentLoom framework
+    url: https://github.com/Keven1894/AgentLoom
+    about: Authoring-time governance framework (separate repo).
+  - name: Runtime README
+    url: https://github.com/Keven1894/agentloom-runtime/blob/main/README.md
+    about: Install and module API reference.
