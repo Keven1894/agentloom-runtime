@@ -10,8 +10,8 @@ propose-review-accept, Tier-A validators), **AgentLoom Runtime** is the
 production-side companion: how a deployed agent *remembers*, *retrieves*, and
 keeps its knowledge faithful to what was authored.
 
-> **Status:** early library release (v0.1.0). The `agentloom_runtime.db` module
-> is installable today; memory and KG sync modules are landing next.
+> **Status:** v0.1.0 library release. Installable modules: `db`, `memory`, `kg`,
+> `fair`, `quality`, plus CORE MySQL migrations. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quickstart
 
@@ -28,15 +28,41 @@ python -m venv .venv
 # source .venv/bin/activate && pip install -e .[dev] && pytest -q
 ```
 
-Configure MySQL via environment variables:
+Or with Make: `make install && make test`
+
+### Database
+
+Apply CORE migrations (MySQL 8+) before using memory/KG modules:
 
 ```bash
+mysql -h "$AGENTLOOM_DB_HOST" -u "$AGENTLOOM_DB_USER" -p "$AGENTLOOM_DB_NAME" \
+  < migrations/mysql/001_core_schema.sql
+mysql ... < migrations/mysql/002_memory_embeddings.sql
+mysql ... < migrations/mysql/003_kg_graph.sql
+```
+
+Configure connection:
+
+```bash
+export AGENTLOOM_REPO_ROOT=/path/to/your/agent   # KG JSON + docs live here
 export AGENTLOOM_DB_HOST=127.0.0.1
 export AGENTLOOM_DB_NAME=app_db
 export AGENTLOOM_DB_USER=runtime
 export AGENTLOOM_DB_PASSWORD=...
 # or: export DATABASE_URL=mysql://runtime:...@127.0.0.1:3306/app_db
 ```
+
+Optional embedding provider (vector search):
+
+```bash
+export OPENAI_API_KEY=...
+export EMBEDDING_MODEL=text-embedding-3-small
+pip install -e ".[dev,embeddings]"
+```
+
+## Python API
+
+### Database
 
 ```python
 from agentloom_runtime.db import connect
@@ -46,7 +72,69 @@ with connect() as conn:
     assert row["ok"] == 1
 ```
 
-Or with Make: `make install && make test`
+### Memory & retrieval
+
+```python
+from pathlib import Path
+from agentloom_runtime.memory import (
+    register_embedding_sync_marker,
+    search_kg_docshare_joint,
+)
+
+register_embedding_sync_marker("kg", Path("Scripts/kg_sync/last_run.json"))
+register_embedding_sync_marker("docshare", Path("Scripts/docshare/last_embeddings_run.json"))
+
+kg_hits, doc_hits, mode = search_kg_docshare_joint("how does KG sync work?")
+```
+
+### KG search & sync
+
+```python
+from agentloom_runtime.kg import search_kg, format_for_prompt
+
+hits = search_kg("how do I validate the knowledge graph?", top_k=5)
+prompt_block = format_for_prompt(hits)
+```
+
+CLI-style sync (from repo root with `agents/knowledge-graphs/`):
+
+```bash
+export AGENTLOOM_REPO_ROOT=$PWD
+python -m agentloom_runtime.kg.sync.rebuild              # dry-run (default)
+python -m agentloom_runtime.kg.sync.rebuild --commit     # write to DB
+python -m agentloom_runtime.kg.sync.validate
+python -m agentloom_runtime.kg.sync.run_graph_sync
+```
+
+### FAIR compliance
+
+```python
+from agentloom_runtime.fair import calculate_fair_compliance
+
+result = calculate_fair_compliance(metadata_dict)  # Dataverse-style JSON
+print(result.overall_score, result.overall_status)
+```
+
+### Quality checks
+
+```python
+from agentloom_runtime.quality import run_health_check, validate_all_schemas
+
+passed, failed, _ = validate_all_schemas()
+report = run_health_check()
+print(report.overall_status)
+```
+
+## Package layout
+
+| Module | Purpose |
+|--------|---------|
+| `agentloom_runtime.db` | MySQL connection adapter |
+| `agentloom_runtime.memory` | In-process embedding indexes + RRF joint retrieval |
+| `agentloom_runtime.kg` | Semantic KG search + file→DB sync pipeline |
+| `agentloom_runtime.fair` | FAIR metadata compliance calculator |
+| `agentloom_runtime.quality` | KG JSON Schema + integrity validators |
+| `migrations/mysql/` | CORE operational schema (no instance-specific tables) |
 
 ## Why this exists
 
