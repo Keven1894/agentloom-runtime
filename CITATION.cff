@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this library, please cite AgentLoom and this release as below:"
+authors:
+  - family-names: Guan
+    given-names: Boyuan (Keven)
+    affiliation: Florida International University, Library & GIS Center
+    orcid: https://orcid.org/0000-0002-4244-5011
+title: "AgentLoom Runtime: Production Library for Governed Agent Memory and Retrieval"
+abstract: >
+  AgentLoom Runtime v0.1.0 provides installable modules for database access,
+  layered memory and retrieval, knowledge-graph sync, and FAIR/quality validators
+  for production agent deployments. It complements the AgentLoom authoring-time
+  governance framework. Extracted from research data lifecycle management practice
+  at an academic library; public releases are framework-neutral library code only.
+version: "0.1.0"
+date-released: 2026-06-11
+license: MIT
+repository-code: "https://github.com/Keven1894/agentloom-runtime"
+type: software
+keywords:
+  - AgentLoom Runtime
+  - Agentic AI
+  - Research Data Lifecycle
+  - Research Data Management
+  - Data Curation
+  - FAIR Data
+  - Knowledge Graphs
+  - Retrieval
+  - Memory

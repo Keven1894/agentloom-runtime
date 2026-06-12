@@ -5,6 +5,10 @@
 **Dr. Boyuan (Keven) Guan** — Florida International University, Library & GIS Center  
 <bguan@fiu.edu>
 
+Independently maintained research software. Production RDM context: companion to
+AgentLoom deployments managing research data lifecycle workloads at an academic
+library (see [AgentLoom CONTRIBUTORS](https://github.com/Keven1894/AgentLoom/blob/main/CONTRIBUTORS.md)).
+
 ## Contributors
 
 ### Dr. Levente Juhász

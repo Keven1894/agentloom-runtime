@@ -8,7 +8,9 @@ authored knowledge into runtime behavior.
 Where **AgentLoom** is the builder-side governance framework (knowledge graphs,
 propose-review-accept, Tier-A validators), **AgentLoom Runtime** is the
 production-side companion: how a deployed agent *remembers*, *retrieves*, and
-keeps its knowledge faithful to what was authored.
+keeps its knowledge faithful to what was authored. Extracted from production
+research data lifecycle agent deployments (EnviStor); this repo ships
+framework-neutral library code only.
 
 > **Status:** v0.1.0 library release. Installable modules: `db`, `memory`, `kg`,
 > `fair`, `quality`, plus CORE MySQL migrations. See [CHANGELOG.md](CHANGELOG.md).

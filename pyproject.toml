@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentloom-runtime"
 version = "0.1.0"
-description = "Production runtime library for AgentLoom agents: layered memory, graph-first retrieval, and file-to-database KG sync."
+description = "Production runtime library for AgentLoom agents: layered memory, graph-first retrieval, and file-to-database KG sync. Companion to research data lifecycle agent deployments."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -17,7 +17,11 @@ keywords = [
     "knowledge-graphs",
     "retrieval",
     "memory",
-    "mcp",
+    "research-data-lifecycle",
+    "research-data-management",
+    "data-curation",
+    "FAIR-data",
+    "digital-library",
 ]
 dependencies = [
     "jsonschema>=4,<5",
