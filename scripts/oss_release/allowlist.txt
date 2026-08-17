@@ -16,3 +16,14 @@
 # Author attribution in the LICENSE copyright line (intentional, public):
 Copyright (c) 2025-2026 Dr. Boyuan (Keven) Guan, FIU Library & GIS Center
 bguan@fiu.edu
+
+# --- Session memory (Layer 0) documentation examples --------------------------
+# SCP-style Git remotes look like email addresses to the scanner. These are
+# fictional example repositories used to show workspace-key normalization.
+Acme/widget
+acme/widget
+acme/Widget.git
+acme/a.git
+acme/b.git
+# Generic cross-platform path illustration, not a real developer checkout:
+`C:\projects\widget` on Windows and `/home/dev/widget` on Linux

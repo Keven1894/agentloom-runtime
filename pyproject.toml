@@ -37,6 +37,9 @@ embeddings = [
     "openai>=1.0,<2",
 ]
 
+[project.scripts]
+agentloom-session = "agentloom_runtime.session.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/Keven1894/agentloom-runtime"
 Repository = "https://github.com/Keven1894/agentloom-runtime"

@@ -41,7 +41,11 @@ mysql -h "$AGENTLOOM_DB_HOST" -u "$AGENTLOOM_DB_USER" -p "$AGENTLOOM_DB_NAME" \
   < migrations/mysql/001_core_schema.sql
 mysql ... < migrations/mysql/002_memory_embeddings.sql
 mysql ... < migrations/mysql/003_kg_graph.sql
+mysql ... < migrations/mysql/004_session_memory.sql
 ```
+
+`004_session_memory.sql` is standalone: apply it on its own if you only want
+Layer 0 session continuity.
 
 Configure connection:
 
@@ -108,6 +112,30 @@ python -m agentloom_runtime.kg.sync.validate
 python -m agentloom_runtime.kg.sync.run_graph_sync
 ```
 
+### Cross-host session memory (Layer 0)
+
+Resume work on a repository from a different machine or a different IDE. Session
+identity comes from the VCS remote, so no editor-local storage is ever read.
+
+```bash
+export AGENTLOOM_AGENT_ID=my-builder
+
+agentloom-session resume                                    # what was I doing here?
+agentloom-session checkpoint --next "Apply migration to dev" --plan docs/plan/x.md
+```
+
+Same thing from Python:
+
+```python
+from agentloom_runtime.session import detect_workspace_key, render_resume_pack, resume
+
+pack = resume("my-builder", "alice", detect_workspace_key())
+print(render_resume_pack(pack))
+```
+
+Design, host-neutrality invariants, and the host adapter conformance checklist:
+[`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md).
+
 ### FAIR compliance
 
 ```python
@@ -132,6 +160,7 @@ print(report.overall_status)
 | Module | Purpose |
 |--------|---------|
 | `agentloom_runtime.db` | MySQL connection adapter |
+| `agentloom_runtime.session` | Layer 0 working-session memory: cross-host, IDE-independent resume |
 | `agentloom_runtime.memory` | In-process embedding indexes + RRF joint retrieval |
 | `agentloom_runtime.kg` | Semantic KG search + file→DB sync pipeline |
 | `agentloom_runtime.fair` | FAIR metadata compliance calculator |
@@ -156,6 +185,7 @@ retrieval pipeline that serves them.
 | Doc | What it covers |
 |-----|----------------|
 | [`docs/memory/three-layer-memory-architecture.md`](docs/memory/three-layer-memory-architecture.md) | The layered memory model: curated knowledge, management state, and plan/provenance — with a retrieval router and freshness rules. |
+| [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md) | Cross-host working-session continuity: why not to sync the editor's database, the host-neutrality invariants, and the host adapter contract. |
 | [`docs/memory/adr-001-kg-as-engine.md`](docs/memory/adr-001-kg-as-engine.md) | Architecture decision: the knowledge graph is the runtime *engine* via one graph-first pipeline, not a documentation-only artifact. |
 | [`docs/memory/kg-sync-and-maintenance.md`](docs/memory/kg-sync-and-maintenance.md) | The one-way file → database sync contract that keeps authored knowledge and runtime behavior in agreement. |
 | [`docs/agents/operational-agent-productization-playbook.md`](docs/agents/operational-agent-productization-playbook.md) | An 8-step process for turning a manual workflow into a governed, token-protected, dispatchable MCP agent. |

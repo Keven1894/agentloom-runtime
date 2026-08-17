@@ -12,9 +12,21 @@ def test_core_migration_files_exist():
         MIGRATIONS / "001_core_schema.sql",
         MIGRATIONS / "002_memory_embeddings.sql",
         MIGRATIONS / "003_kg_graph.sql",
+        MIGRATIONS / "004_session_memory.sql",
     ]
     for path in files:
         assert path.is_file(), path.name
+
+
+def test_session_migration_is_standalone():
+    """Layer 0 must be appliable without the CORE schema."""
+    session = (MIGRATIONS / "004_session_memory.sql").read_text(encoding="utf-8")
+    for table in ("agent_sessions", "session_checkpoints", "session_turns"):
+        assert f"`{table}`" in session
+    # Its only foreign keys point at its own tables.
+    for line in session.splitlines():
+        if "REFERENCES" in line:
+            assert "`agent_sessions`" in line, line.strip()
 
 
 def test_core_migration_covers_runtime_tables():
