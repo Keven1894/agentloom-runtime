@@ -101,10 +101,31 @@ should take minutes.
 3. Do the work using the agent's normal memory layers.
 4. Run `agentloom-session checkpoint --next "…"` before stopping.
 
-The only per-host difference is *where that instruction is written*: a rules
-file, a system prompt, or a documented habit. Keep the instruction text in one
-canonical place and emit it to each host's format rather than maintaining
-divergent copies.
+The only per-host difference is *where that instruction is written*, because
+each host auto-loads a different file. Write the instruction once and generate
+the rest with `agentloom-hostrules`:
+
+```json
+{
+  "source": "agents/AGENT_BOOTSTRAP.md",
+  "targets": [
+    {"path": "AGENTS.md"},
+    {"path": ".some-editor/rules/agentloom-session.md",
+     "front_matter": {"alwaysApply": true}}
+  ]
+}
+```
+
+```bash
+agentloom-hostrules sync    # write every host's rule file
+agentloom-hostrules check   # fail if any drifted (CI / pre-commit)
+```
+
+A target is a path plus optional front matter — the path is the entire host
+binding, and the emitter knows about no specific editor. Supporting an IDE that
+does not exist yet is a manifest entry, not a code change and not a release.
+That property is itself a test: if an editor's name appears in the emitter, some
+host has become privileged and the next one will need special handling.
 
 ### Conformance checklist
 

@@ -21,6 +21,16 @@
   - Host-neutrality invariants (identity never derives from host/path/IDE;
     provenance hints are never lookup predicates) are enforced by tests.
 
+- **`agentloom_runtime.hostrules`** — generate every AI coding host's rule file
+  from one canonical bootstrap instruction, so Layer 0 engages automatically
+  wherever the agent runs.
+  - `agentloom-hostrules sync` / `check` (the latter suits CI or a pre-commit
+    hook, failing when a generated file drifts from its source).
+  - A target is a path plus optional front matter. The emitter knows about no
+    specific editor, so supporting an IDE that does not exist yet is a manifest
+    entry rather than a code change — enforced by a test that fails if any
+    editor name appears in the module.
+
 ### Documentation
 
 - `docs/memory/layer-0-session-memory.md` — why not to sync the editor's own

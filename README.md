@@ -133,6 +133,17 @@ pack = resume("my-builder", "alice", detect_workspace_key())
 print(render_resume_pack(pack))
 ```
 
+To make that automatic in whatever editor you use, write the bootstrap
+instruction once and generate each host's rule file from it:
+
+```bash
+agentloom-hostrules sync     # one source -> AGENTS.md, editor rule files, …
+agentloom-hostrules check    # fail if any drifted (CI / pre-commit)
+```
+
+A target is a path plus optional front matter, so supporting a new IDE is a
+manifest entry rather than a code change.
+
 Design, host-neutrality invariants, and the host adapter conformance checklist:
 [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md).
 
@@ -161,6 +172,7 @@ print(report.overall_status)
 |--------|---------|
 | `agentloom_runtime.db` | MySQL connection adapter |
 | `agentloom_runtime.session` | Layer 0 working-session memory: cross-host, IDE-independent resume |
+| `agentloom_runtime.hostrules` | One bootstrap instruction generated into every host's rule file |
 | `agentloom_runtime.memory` | In-process embedding indexes + RRF joint retrieval |
 | `agentloom_runtime.kg` | Semantic KG search + file→DB sync pipeline |
 | `agentloom_runtime.fair` | FAIR metadata compliance calculator |
