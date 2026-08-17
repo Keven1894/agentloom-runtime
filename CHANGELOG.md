@@ -31,11 +31,40 @@
     entry rather than a code change — enforced by a test that fails if any
     editor name appears in the module.
 
+- **Layer 0 conversation archive** — the conversation itself now travels between
+  machines, not only the agent's working state. Checkpoints stay the cheap index
+  loaded on every resume; the archive is the detail paged in on demand.
+  - `migrations/mysql/005_session_transcripts.sql` — `session_transcripts`,
+    holding redacted conversations as compressed JSON keyed by
+    `(source_host, source_ref)`, so re-archiving a conversation that is still
+    growing updates one row. Requires 004.
+  - `agentloom-session archive` / `transcripts` / `replay`, rendering to text,
+    Markdown, or JSON. `checkpoint` now archives and cites the current
+    conversation by default (`--no-archive` opts out), so a terse checkpoint can
+    always be expanded into the exchange it came from.
+  - `agentloom_runtime.session.readers` — an explicit read-only plugin seam for
+    host-specific capture, with a Cursor reader. Supporting another host is one
+    module; nothing outside the package changes. A test fails if any reader
+    gains a write, delete, or truncate call, and the host-neutrality tests now
+    cover the subpackage.
+  - Transcripts are redacted **before** storage: provider tokens, `KEY=value`
+    assignments, bearer tokens, connection-string passwords, and private-key
+    blocks become `[redacted:…]` markers. Redaction is idempotent, so re-running
+    it over stored data and expecting zero hits is a valid completeness audit.
+  - Tool arguments are truncated per field rather than whole: a path survives
+    intact, a file body does not. Those bodies are already in version control,
+    and they are both the bulk and the largest exposure surface.
+
+  Restoring a conversation as native chat bubbles inside an editor's own sidebar
+  remains out of scope: it requires writing an undocumented, path-keyed store
+  that the running editor holds open.
+
 ### Documentation
 
-- `docs/memory/layer-0-session-memory.md` — why not to sync the editor's own
-  database, the host-neutrality invariants, and the host adapter conformance
-  checklist.
+- `docs/memory/layer-0-session-memory.md` — separates the four problems behind
+  "sync my sessions" (capture, move, reconstruct, repaint in a vendor UI) and
+  marks only the last unsupported; adds the checkpoint-vs-archive split, the
+  redaction contract, and the amended H5 invariant.
 
 ## 0.1.0 — 2026-06-11
 

@@ -68,7 +68,15 @@ def test_empty_remote_is_rejected():
 
 
 def _sources() -> dict[str, str]:
-    return {p.name: p.read_text(encoding="utf-8") for p in SESSION_PKG.glob("*.py")}
+    """Every module in the session package, including host readers.
+
+    Readers are the one place that touches host-specific storage, so they are
+    exactly where a host-neutrality violation would show up first.
+    """
+    return {
+        str(p.relative_to(SESSION_PKG)): p.read_text(encoding="utf-8")
+        for p in SESSION_PKG.rglob("*.py")
+    }
 
 
 def test_hints_are_never_used_as_lookup_predicates():
@@ -85,11 +93,14 @@ def test_hints_are_never_used_as_lookup_predicates():
         )
 
 
-def test_session_layer_never_reads_editor_local_storage():
+def test_session_layer_never_touches_a_hosts_private_chat_store():
+    """Reading a host's plain transcript file is fine; opening its internal
+    chat database is not. The latter is keyed by absolute path, changes shape
+    between releases, and is held open by the running editor."""
     forbidden = ("state.vscdb", "workspaceStorage", "globalStorage", "composerData")
     for name, source in _sources().items():
         for token in forbidden:
-            assert token not in source, f"{name} references editor-local storage: {token}"
+            assert token not in source, f"{name} references a private chat store: {token}"
 
 
 def test_session_layer_carries_no_deployment_identity():

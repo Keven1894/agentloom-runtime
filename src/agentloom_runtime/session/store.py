@@ -7,26 +7,33 @@ storage, and no query filters on a machine name, filesystem path, or IDE.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
+import zlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from agentloom_runtime.db import connect
 from agentloom_runtime.session.identity import HostContext
+from agentloom_runtime.session.transcript import TranscriptDocument
 
 __all__ = [
     "ResumePack",
     "SessionRecord",
+    "TranscriptRecord",
     "add_turn",
     "checkpoint",
     "close_session",
     "list_checkpoints",
+    "list_transcripts",
+    "load_transcript",
     "open_session",
     "park_session",
     "render_resume_pack",
     "resume",
     "search_sessions",
+    "store_transcript",
 ]
 
 CHECKPOINT_SCHEMA_VERSION = 1
@@ -426,6 +433,205 @@ def park_session(session_id: str) -> bool:
 
 def close_session(session_id: str) -> bool:
     return _set_status(session_id, "closed")
+
+
+# ---------------------------------------------------------------------------
+# Transcript archive
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPT_COLUMNS = (
+    "transcript_id, session_id, source_host, source_ref, workspace_key, agent_id, "
+    "operator_id, captured_at, turn_count, redaction_count, body_bytes, content_sha256"
+)
+
+
+@dataclass
+class TranscriptRecord:
+    """Archive metadata. The body is fetched separately — it is large."""
+
+    transcript_id: str
+    session_id: Optional[str]
+    source_host: str
+    source_ref: str
+    workspace_key: str
+    agent_id: Optional[str] = None
+    operator_id: Optional[str] = None
+    captured_at: Optional[str] = None
+    turn_count: int = 0
+    redaction_count: int = 0
+    body_bytes: int = 0
+    content_sha256: str = ""
+
+    @classmethod
+    def from_row(cls, row: Any) -> "TranscriptRecord":
+        return cls(
+            transcript_id=row["transcript_id"],
+            session_id=row["session_id"],
+            source_host=row["source_host"],
+            source_ref=row["source_ref"],
+            workspace_key=row["workspace_key"],
+            agent_id=row["agent_id"],
+            operator_id=row["operator_id"],
+            captured_at=_iso(row["captured_at"]),
+            turn_count=int(row["turn_count"]),
+            redaction_count=int(row["redaction_count"]),
+            body_bytes=int(row["body_bytes"]),
+            content_sha256=row["content_sha256"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def store_transcript(
+    doc: TranscriptDocument,
+    workspace_key: str,
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    operator_id: Optional[str] = None,
+) -> tuple[str, bool]:
+    """Archive a normalized transcript. Returns ``(transcript_id, changed)``.
+
+    Conversations grow while they happen, so re-archiving is expected and
+    updates the existing row for that ``(source_host, source_ref)``. An
+    unchanged body is detected by hash and skips the write entirely, which
+    keeps repeated archiving cheap enough to run on every checkpoint.
+    """
+    body = json.dumps(doc.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(body).hexdigest()
+    compressed = zlib.compress(body, 6)
+
+    conn = connect()
+    try:
+        existing = conn.execute(
+            "SELECT transcript_id, content_sha256 FROM session_transcripts "
+            "WHERE source_host = ? AND source_ref = ?",
+            [doc.source_host, doc.source_ref],
+        ).fetchone()
+
+        if existing:
+            transcript_id = existing["transcript_id"]
+            if existing["content_sha256"] == digest:
+                return transcript_id, False
+            conn.execute(
+                """
+                UPDATE session_transcripts
+                SET session_id = COALESCE(?, session_id),
+                    workspace_key = ?, agent_id = ?, operator_id = ?,
+                    turn_count = ?, redaction_count = ?, body_bytes = ?,
+                    content_sha256 = ?, body_zlib = ?
+                WHERE transcript_id = ?
+                """,
+                [
+                    session_id,
+                    workspace_key,
+                    agent_id,
+                    operator_id,
+                    doc.turn_count,
+                    doc.redaction_count,
+                    len(body),
+                    digest,
+                    compressed,
+                    transcript_id,
+                ],
+            )
+        else:
+            transcript_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO session_transcripts
+                    (transcript_id, session_id, source_host, source_ref, workspace_key,
+                     agent_id, operator_id, turn_count, redaction_count, body_bytes,
+                     content_sha256, body_zlib)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    transcript_id,
+                    session_id,
+                    doc.source_host,
+                    doc.source_ref,
+                    workspace_key,
+                    agent_id,
+                    operator_id,
+                    doc.turn_count,
+                    doc.redaction_count,
+                    len(body),
+                    digest,
+                    compressed,
+                ],
+            )
+        conn.commit()
+        return transcript_id, True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def list_transcripts(
+    workspace_key: Optional[str] = None,
+    session_id: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    limit: int = 20,
+) -> list[TranscriptRecord]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("workspace_key", workspace_key),
+        ("session_id", session_id),
+        ("source_ref", source_ref),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(int(limit))
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"SELECT {_TRANSCRIPT_COLUMNS} FROM session_transcripts {where} "
+            "ORDER BY captured_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [TranscriptRecord.from_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def load_transcript(
+    transcript_id: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    workspace_key: Optional[str] = None,
+) -> Optional[TranscriptDocument]:
+    """Fetch and decompress one archived conversation.
+
+    With neither identifier, returns the most recent transcript for the
+    workspace — the common "show me what we were just doing" case.
+    """
+    if transcript_id:
+        where, params = "WHERE transcript_id = ?", [transcript_id]
+    elif source_ref:
+        where, params = "WHERE source_ref = ?", [source_ref]
+    elif workspace_key:
+        where, params = "WHERE workspace_key = ?", [workspace_key]
+    else:
+        raise ValueError("one of transcript_id, source_ref, or workspace_key is required")
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            f"SELECT body_zlib FROM session_transcripts {where} "
+            "ORDER BY captured_at DESC LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None or row["body_zlib"] is None:
+            return None
+        payload = json.loads(zlib.decompress(row["body_zlib"]).decode("utf-8"))
+        return TranscriptDocument.from_dict(payload)
+    finally:
+        conn.close()
 
 
 def render_resume_pack(pack: Optional[ResumePack]) -> str:

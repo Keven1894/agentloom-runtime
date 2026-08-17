@@ -14,18 +14,29 @@ from agentloom_runtime.session.identity import (
     normalize_workspace_key,
     resolve_operator_id,
 )
+from agentloom_runtime.session.readers import discover_transcripts, get_reader
 from agentloom_runtime.session.store import (
     ResumePack,
     SessionRecord,
+    TranscriptRecord,
     add_turn,
     checkpoint,
     close_session,
     list_checkpoints,
+    list_transcripts,
+    load_transcript,
     open_session,
     park_session,
     render_resume_pack,
     resume,
     search_sessions,
+    store_transcript,
+)
+from agentloom_runtime.session.transcript import (
+    TranscriptDocument,
+    redact,
+    render_markdown,
+    render_text,
 )
 from agentloom_runtime.session.vcs import VcsState, collect_vcs_state
 
@@ -33,6 +44,8 @@ __all__ = [
     "HostContext",
     "ResumePack",
     "SessionRecord",
+    "TranscriptDocument",
+    "TranscriptRecord",
     "VcsState",
     "add_turn",
     "checkpoint",
@@ -40,12 +53,20 @@ __all__ = [
     "collect_vcs_state",
     "detect_host_context",
     "detect_workspace_key",
+    "discover_transcripts",
+    "get_reader",
     "list_checkpoints",
+    "list_transcripts",
+    "load_transcript",
     "normalize_workspace_key",
     "open_session",
     "park_session",
+    "redact",
+    "render_markdown",
     "render_resume_pack",
+    "render_text",
     "resolve_operator_id",
     "resume",
     "search_sessions",
+    "store_transcript",
 ]

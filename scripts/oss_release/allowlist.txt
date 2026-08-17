@@ -27,3 +27,15 @@ acme/a.git
 acme/b.git
 # Generic cross-platform path illustration, not a real developer checkout:
 `C:\projects\widget` on Windows and `/home/dev/widget` on Linux
+``C:\\projects\\widget`` becomes ``c-projects-widget``
+workspace_slug(Path("C:/projects/widget"))
+
+# --- Transcript redaction test fixtures ---------------------------------------
+# Synthetic credential-shaped strings that exist *because* the tests assert they
+# get redacted. None is a real key; each is a literal in tests/test_transcript.py.
+sk-abcdefghijklmnopqrstuvwxyz123456
+sk-abcdefghijklmnopqrstuvwxyz01
+ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345
+xoxb-1234567890-abcdefghij
+AKIAIOSFODNN7EXAMPLE
+mysql://admin:sup3rSecret@db.example.org

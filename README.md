@@ -42,10 +42,12 @@ mysql -h "$AGENTLOOM_DB_HOST" -u "$AGENTLOOM_DB_USER" -p "$AGENTLOOM_DB_NAME" \
 mysql ... < migrations/mysql/002_memory_embeddings.sql
 mysql ... < migrations/mysql/003_kg_graph.sql
 mysql ... < migrations/mysql/004_session_memory.sql
+mysql ... < migrations/mysql/005_session_transcripts.sql
 ```
 
 `004_session_memory.sql` is standalone: apply it on its own if you only want
-Layer 0 session continuity.
+Layer 0 session continuity. `005_session_transcripts.sql` adds the conversation
+archive and requires 004.
 
 Configure connection:
 
@@ -115,7 +117,8 @@ python -m agentloom_runtime.kg.sync.run_graph_sync
 ### Cross-host session memory (Layer 0)
 
 Resume work on a repository from a different machine or a different IDE. Session
-identity comes from the VCS remote, so no editor-local storage is ever read.
+identity comes from the VCS remote, so no editor-local path or private chat
+store is ever consulted.
 
 ```bash
 export AGENTLOOM_AGENT_ID=my-builder
@@ -123,6 +126,20 @@ export AGENTLOOM_AGENT_ID=my-builder
 agentloom-session resume                                    # what was I doing here?
 agentloom-session checkpoint --next "Apply migration to dev" --plan docs/plan/x.md
 ```
+
+Checkpoints are deliberately terse — they load on every resume. When you need
+the actual conversation behind one, the archive holds it:
+
+```bash
+agentloom-session archive --all      # capture this host's conversations (read-only)
+agentloom-session replay --last 20   # read the most recent one back
+```
+
+Conversations are captured by per-host read-only readers, redacted for
+credential-shaped content before storage, and rendered as text, Markdown, or
+JSON. What this does *not* do is repaint them as native chat bubbles in an
+editor's own sidebar — that would mean writing a private chat store that is
+undocumented, path-keyed, and held open by the running editor.
 
 Same thing from Python:
 
@@ -197,7 +214,7 @@ retrieval pipeline that serves them.
 | Doc | What it covers |
 |-----|----------------|
 | [`docs/memory/three-layer-memory-architecture.md`](docs/memory/three-layer-memory-architecture.md) | The layered memory model: curated knowledge, management state, and plan/provenance — with a retrieval router and freshness rules. |
-| [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md) | Cross-host working-session continuity: why not to sync the editor's database, the host-neutrality invariants, and the host adapter contract. |
+| [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md) | Cross-host working-session continuity: checkpoints vs. the transcript archive, why not to write the editor's chat database, the host-neutrality invariants, and the host adapter contract. |
 | [`docs/memory/adr-001-kg-as-engine.md`](docs/memory/adr-001-kg-as-engine.md) | Architecture decision: the knowledge graph is the runtime *engine* via one graph-first pipeline, not a documentation-only artifact. |
 | [`docs/memory/kg-sync-and-maintenance.md`](docs/memory/kg-sync-and-maintenance.md) | The one-way file → database sync contract that keeps authored knowledge and runtime behavior in agreement. |
 | [`docs/agents/operational-agent-productization-playbook.md`](docs/agents/operational-agent-productization-playbook.md) | An 8-step process for turning a manual workflow into a governed, token-protected, dispatchable MCP agent. |

@@ -20,6 +20,8 @@ from agentloom_runtime.session.identity import (
     detect_workspace_key,
     resolve_operator_id,
 )
+from agentloom_runtime.session.readers import discover_transcripts, get_reader
+from agentloom_runtime.session.transcript import render_markdown, render_text
 from agentloom_runtime.session.vcs import collect_vcs_state
 
 DEFAULT_AGENT_ENV = "AGENTLOOM_AGENT_ID"
@@ -108,9 +110,50 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def _archive_sources(
+    sources: list,
+    workspace_key: str,
+    session_id: Optional[str],
+    agent_id: Optional[str],
+    operator_id: Optional[str],
+) -> list[dict[str, Any]]:
+    """Parse and store transcripts, skipping any a reader cannot handle."""
+    archived = []
+    for source in sources:
+        reader = get_reader(source.host)
+        if reader is None:
+            continue
+        try:
+            doc = reader.read(source)
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop the rest
+            archived.append({"ref": source.ref, "host": source.host, "error": str(exc)})
+            continue
+        if not doc.turns:
+            continue
+        transcript_id, changed = store.store_transcript(
+            doc,
+            workspace_key=workspace_key,
+            session_id=session_id,
+            agent_id=agent_id,
+            operator_id=operator_id,
+        )
+        archived.append(
+            {
+                "ref": source.ref,
+                "host": source.host,
+                "transcript_id": transcript_id,
+                "turns": doc.turn_count,
+                "redactions": doc.redaction_count,
+                "action": "stored" if changed else "unchanged",
+            }
+        )
+    return archived
+
+
 def cmd_checkpoint(args: argparse.Namespace) -> int:
     agent_id, operator_id, workspace_key = _identity(args)
     host = detect_host_context(Path(args.path) if args.path else None)
+    workspace_path = Path(args.path) if args.path else Path.cwd()
 
     if args.session:
         session_id = args.session
@@ -120,7 +163,18 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         )
         session_id = session.session_id
 
-    vcs = collect_vcs_state(Path(args.path) if args.path else None) if not args.no_vcs else None
+    # Archive the conversation this checkpoint belongs to and cite it, so the
+    # checkpoint's "what" can always be expanded into the underlying "why".
+    citations = list(args.cite or [])
+    archived: list[dict[str, Any]] = []
+    if not args.no_archive:
+        sources = discover_transcripts(workspace_path)[:1]
+        archived = _archive_sources(sources, workspace_key, session_id, agent_id, operator_id)
+        citations += [
+            f"{a['host']}:{a['ref']}" for a in archived if a.get("transcript_id")
+        ]
+
+    vcs = collect_vcs_state(workspace_path) if not args.no_vcs else None
     checkpoint_id = store.checkpoint(
         session_id,
         next_action=args.next,
@@ -129,14 +183,73 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         vcs_branch=vcs.branch if vcs else None,
         vcs_status_summary=vcs.status_summary if vcs else None,
         decisions=args.decision or None,
-        transcript_citations=args.cite or None,
+        transcript_citations=citations or None,
         host=host,
     )
+    lines = [f"checkpoint {checkpoint_id} saved for session {session_id}"]
+    lines += [
+        f"  transcript {a['ref']} ({a.get('turns', '?')} turns, "
+        f"{a.get('redactions', 0)} redacted): {a.get('action', a.get('error'))}"
+        for a in archived
+    ]
     _emit(
-        {"checkpoint_id": checkpoint_id, "session_id": session_id},
-        f"checkpoint {checkpoint_id} saved for session {session_id}",
+        {"checkpoint_id": checkpoint_id, "session_id": session_id, "transcripts": archived},
+        "\n".join(lines),
         args.json,
     )
+    return 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    agent_id, operator_id, workspace_key = _identity(args)
+    workspace_path = Path(args.path) if args.path else Path.cwd()
+
+    sources = discover_transcripts(workspace_path, host=args.host)
+    if not args.all:
+        sources = sources[: args.limit]
+    if not sources:
+        _emit([], "no host transcripts found for this workspace", args.json)
+        return 0
+
+    archived = _archive_sources(sources, workspace_key, None, agent_id, operator_id)
+    text = "\n".join(
+        f"  {a.get('action', 'error'):<9} {a['host']}:{a['ref']}  "
+        f"{a.get('turns', '?')} turns, {a.get('redactions', 0)} redacted"
+        for a in archived
+    ) or "nothing archived"
+    _emit(archived, f"{len(archived)} transcript(s) from {workspace_key}\n{text}", args.json)
+    return 0
+
+
+def cmd_transcripts(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    records = store.list_transcripts(workspace_key=workspace_key, limit=args.limit)
+    text = "\n".join(
+        f"{r.captured_at}  {r.turn_count:>4} turns  {r.body_bytes:>8}B  "
+        f"{r.source_host}:{r.source_ref}"
+        for r in records
+    ) or "no archived transcripts for this workspace"
+    _emit([r.to_dict() for r in records], text, args.json)
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    doc = store.load_transcript(
+        source_ref=args.ref,
+        workspace_key=None if args.ref else workspace_key,
+    )
+    if doc is None:
+        print("no archived transcript found. Run 'agentloom-session archive' first.")
+        return 0
+
+    doc = doc.tail(args.last)
+    if args.format == "json":
+        print(json.dumps(doc.to_dict(), indent=2, ensure_ascii=False))
+    elif args.format == "markdown":
+        print(render_markdown(doc))
+    else:
+        print(render_text(doc))
     return 0
 
 
@@ -217,7 +330,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", action="append", help="a decision made (repeatable)")
     p.add_argument("--cite", action="append", help="external transcript reference (repeatable)")
     p.add_argument("--no-vcs", action="store_true", help="skip working-tree capture")
+    p.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="do not archive and cite this host's current transcript",
+    )
     p.set_defaults(func=cmd_checkpoint)
+
+    p = sub.add_parser("archive", help="capture this host's conversation transcripts")
+    _add_common(p)
+    p.add_argument("--host", help="only read one host's transcripts")
+    p.add_argument("--all", action="store_true", help="archive every transcript found")
+    p.add_argument("--limit", type=int, default=1, help="how many newest to archive")
+    p.set_defaults(func=cmd_archive)
+
+    p = sub.add_parser("transcripts", help="list archived transcripts for this workspace")
+    _add_common(p)
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_transcripts)
+
+    p = sub.add_parser("replay", help="print an archived conversation")
+    _add_common(p)
+    p.add_argument("--ref", help="source reference (default: newest for this workspace)")
+    p.add_argument("--last", type=int, default=0, help="only the last N turns (0 = all)")
+    p.add_argument(
+        "--format", choices=["text", "markdown", "json"], default="text"
+    )
+    p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("turn", help="append a short turn summary")
     _add_common(p)

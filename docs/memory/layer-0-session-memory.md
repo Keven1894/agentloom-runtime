@@ -20,20 +20,43 @@ over fine.
 Layer 0 puts that state in the same shared database as the rest of the agent's
 memory, so continuity survives the host.
 
-## Non-goal: syncing the editor
+## What is portable, and the one thing that is not
 
-There is a tempting shortcut: reverse-engineer the editor's local database and
-copy it between machines. Do not build on that.
+"Move my sessions between machines" is four separable problems, and only the
+last one is blocked. It is worth being precise about which is which, because
+conflating them leads to abandoning three achievable things to avoid one
+impossible one.
 
-Editor chat stores are private implementation details. They are keyed by a hash
-of the absolute workspace path, they change shape between releases, they are
-cached in memory and not re-read while the editor runs, and concurrent writers
-corrupt them. Anything built on them breaks on the next update.
+| | Problem | Status |
+|---|---|---|
+| 1 | **Capture** the conversation a host recorded | Solved per host by a read-only reader. Plain files, no host API needed. |
+| 2 | **Move** it between machines | Solved. Compressed JSON in the shared database; a long session is a few hundred kilobytes. |
+| 3 | **Reconstruct** it — render it for a human, or feed it back to an agent | Solved. `replay` in text, Markdown, or JSON. |
+| 4 | **Restore it as native chat bubbles in the target host's own sidebar** | Not supported, by decision. |
 
-Layer 0 stores **the agent's working state**, not the editor's conversation.
-Resuming means the agent knows what it was doing, not that old chat bubbles
-reappear in a sidebar. That is a deliberate product decision, and it is what
-makes the capability portable.
+Only (4) requires writing a host's private chat store, and that is the part
+worth refusing. Those stores are keyed by a hash of the absolute workspace
+path, they change shape between releases, the running editor caches them in
+memory rather than re-reading them, and a concurrent external writer corrupts
+them. It is not literally impossible — you can edit the file with the editor
+closed — but a memory system built on it breaks on the next update of a
+product you do not control.
+
+So the trade-off is narrower than "no chat history". The conversation moves;
+what does not move is its rendering inside a *specific vendor's UI widget*. You
+read it with `replay` instead of by scrolling a sidebar.
+
+Layer 0 therefore has two halves:
+
+- **Checkpoints** are the index — a few hundred bytes, loaded on every session
+  start, answering *what was I doing*.
+- **Transcripts** are the archive — a few hundred kilobytes, paged in on
+  demand, answering *what exactly was said, and why did we decide that*.
+
+They are complementary. A transcript is far too large to load on every resume,
+which is why the checkpoint exists; a checkpoint is far too terse to settle an
+argument about a past decision, which is why the archive exists. A checkpoint
+cites the transcript it came from, so you can always expand one into the other.
 
 ## Host neutrality invariants
 
@@ -46,7 +69,7 @@ by tests in `tests/test_session.py`, not just by convention.
 | **H2** | `host_hint`, `ide_hint`, and `workspace_path_hint` are write-only provenance. They must never appear in a lookup predicate or a lookup index. |
 | **H3** | Every operation is reachable from a plain shell command. No editor extension, plugin, or SDK is required. |
 | **H4** | Resume output is plain text (or JSON), readable by any agent without parsing a proprietary format. |
-| **H5** | No code path reads or writes editor-local storage. |
+| **H5** | No code path opens a host's private chat store (`state.vscdb`, `workspaceStorage`, `composerData`, and equivalents), and no code path writes to host-local storage at all. Reading a plain transcript file the host itself wrote is permitted, read-only, and confined to `session/readers/`. |
 
 H2 is the one that fails silently if you get it wrong: filter on a hint and
 everything looks fine on the machine that wrote it, then returns nothing
@@ -89,6 +112,10 @@ agentloom-session whoami       # show resolved identity (debug host neutrality)
 agentloom-session resume       # print the resume pack
 agentloom-session checkpoint --next "Apply the migration to dev" --plan docs/plan/x.md
 agentloom-session park         # pause; frees the identity's open slot
+
+agentloom-session archive --all      # capture this host's conversations
+agentloom-session transcripts        # list what is archived for this workspace
+agentloom-session replay --last 20   # read the most recent conversation back
 ```
 
 ## Host adapter contract
@@ -133,35 +160,55 @@ A host is supported when all of these pass:
 
 - [ ] `agentloom-session whoami` reports the same `workspace_key` as every other host for the same repository.
 - [ ] `resume` returns a checkpoint written by a *different* host.
-- [ ] Nothing in the flow reads editor-local storage.
+- [ ] Nothing in the flow opens the editor's private chat store.
 - [ ] The flow works with the editor's own chat history cleared.
-- [ ] No host-specific code was added to `agentloom_runtime.session`.
+- [ ] No host-specific code was added outside `session/readers/`.
 
 The fourth item is the honest test. If clearing the editor's history breaks
 resume, the state was never really in Layer 0.
 
 ## Data model
 
-Three tables (`migrations/mysql/004_session_memory.sql`):
+Four tables (`migrations/mysql/004_session_memory.sql` and
+`005_session_transcripts.sql`):
 
 | Table | Holds |
 |---|---|
 | `agent_sessions` | one row per working session; a generated `open_key` enforces at most one open session per identity |
-| `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, optional transcript citations |
+| `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, transcript citations |
 | `session_turns` | optional short turn summaries |
+| `session_transcripts` | archived conversations, redacted and compressed, keyed by `(source_host, source_ref)` |
 
 ### What is stored
 
-Structured resume state and short summaries.
+Structured resume state, short summaries, and redacted conversation archives.
 
 ### What is not stored
 
-Editor conversation blobs, full transcripts, and secrets. Checkpoints capture a
-working-tree summary with sensitive paths (`.env`, key material, `secrets/`)
-withheld — the summary records that such a file was dirty, never its name.
+Secrets, and a host's own chat database.
 
-If full transcripts are archived elsewhere for research, cite them by
-identifier on the checkpoint and leave the bytes where they are.
+Two redaction passes protect the archive, because a transcript is precisely
+where a credential that was echoed once would live forever:
+
+- **Checkpoints** summarize the working tree with sensitive paths (`.env`, key
+  material, `secrets/`) withheld — the summary records that such a file was
+  dirty, never its name.
+- **Transcripts** are redacted at capture, before anything is written. Anything
+  credential-shaped — provider tokens, `KEY=value` assignments, bearer tokens,
+  passwords inside connection strings, private-key blocks — is replaced with a
+  `[redacted:…]` marker. Tool arguments are additionally truncated per field, so
+  a path survives intact while a file body does not: those bodies are already in
+  version control and reproducing them here would add bulk and risk without
+  adding recall.
+
+Redaction is idempotent, which makes a useful audit possible: re-run it over
+everything already stored and expect zero hits. A non-zero result means a
+pattern is missing. Run it with
+`Scripts/db_migration/verify_agentloom_transcript_archive.py` in the deployment
+repository.
+
+Redaction is a safety net for accidental echoes, not a licence to paste
+credentials into a conversation.
 
 ## Retrieval routing
 
@@ -169,22 +216,28 @@ Add one row to the router:
 
 | Question | Layer |
 |---|---|
-| "Where did we leave off in this repository?" | **Layer 0 session memory** |
+| "Where did we leave off in this repository?" | **Layer 0 checkpoints** |
+| "What exactly did we say about it?" | **Layer 0 transcript archive** |
 | "What is the accepted design?" | Layer 1 curated knowledge |
 | "What is the team doing now?" | Layer 2 management |
 | "Did we plan this before?" | Layer 3 plan / provenance |
 
-Do not answer the first question from editor transcripts, and do not answer it
-from the team message log — those are a different kind of record with different
-freshness and ownership.
+The first two differ by cost, not by subject. Resume always answers the first
+from a checkpoint; reach for the archive only when the terse answer is not
+enough. Answering "where did we leave off" by replaying a whole conversation
+works but wastes most of a context window on turns nobody needed.
+
+Do not answer either question from the team message log — that is a different
+record with different freshness and ownership.
 
 ## Anti-patterns
 
-- Reading or writing the editor's chat database to move sessions between machines.
+- Opening the editor's private chat database, in either direction, to move sessions between machines.
 - Symlinking editor application-data directories across machines or into cloud storage.
 - Keying a session on the absolute checkout path.
 - Filtering a resume lookup on a machine name or editor label.
-- Storing whole transcripts in the session tables.
+- Loading a full transcript on every resume instead of the checkpoint that cites it.
+- Archiving a transcript without the redaction pass.
 - Requiring an editor extension for any operation.
 
 ## Related
