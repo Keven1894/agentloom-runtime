@@ -116,6 +116,9 @@ agentloom-session park         # pause; frees the identity's open slot
 agentloom-session archive --all      # capture this host's conversations
 agentloom-session transcripts        # list what is archived for this workspace
 agentloom-session replay --last 20   # read the most recent conversation back
+agentloom-session index --all        # build the archive locator (prose chunks + embeddings)
+agentloom-session search "password policy"   # pointers into the archive
+# then: agentloom-session replay --ref <id> --around <seq>
 ```
 
 ## Host adapter contract
@@ -169,8 +172,8 @@ resume, the state was never really in Layer 0.
 
 ## Data model
 
-Four tables (`migrations/mysql/004_session_memory.sql` and
-`005_session_transcripts.sql`):
+Four tables plus a locator (`migrations/mysql/004_session_memory.sql`,
+`005_session_transcripts.sql`, `006_session_transcript_index.sql`):
 
 | Table | Holds |
 |---|---|
@@ -178,6 +181,7 @@ Four tables (`migrations/mysql/004_session_memory.sql` and
 | `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, transcript citations |
 | `session_turns` | optional short turn summaries |
 | `session_transcripts` | archived conversations, redacted and compressed, keyed by `(source_host, source_ref)` |
+| `session_transcript_chunks` | search index over the archive: session-level nodes + overlapping prose windows (human/agent text only). Embeddings optional; lexical search works without them. |
 
 ### What is stored
 
@@ -217,18 +221,22 @@ Add one row to the router:
 | Question | Layer |
 |---|---|
 | "Where did we leave off in this repository?" | **Layer 0 checkpoints** |
-| "What exactly did we say about it?" | **Layer 0 transcript archive** |
+| "What exactly did we say about it?" | **Layer 0 transcript archive** (`replay`) |
+| "When did we decide X?" | **Layer 0 archive locator** (`search` → `replay --around`) |
 | "What is the accepted design?" | Layer 1 curated knowledge |
 | "What is the team doing now?" | Layer 2 management |
 | "Did we plan this before?" | Layer 3 plan / provenance |
 
-The first two differ by cost, not by subject. Resume always answers the first
-from a checkpoint; reach for the archive only when the terse answer is not
-enough. Answering "where did we leave off" by replaying a whole conversation
-works but wastes most of a context window on turns nobody needed.
+The first three differ by cost, not by subject. Resume always answers the first
+from a checkpoint. `search` returns pointers into the archive — never load the
+whole conversation to answer a locator question. Durable decisions still belong
+in the curated KG or a plan; the locator finds the discussion, it does not
+become the authority.
 
-Do not answer either question from the team message log — that is a different
-record with different freshness and ownership.
+The locator indexes **prose only** (human + agent text), at two granularities
+(one session node + overlapping turn windows), and ranks with hybrid lexical +
+vector RRF. Time is a filter (`--since`), not something cosine is asked to
+encode. Tool-call noise is not embedded.
 
 ## Anti-patterns
 

@@ -300,6 +300,17 @@ def test_tail_keeps_the_most_recent_turns(tmp_path):
     assert doc.tail(99).turn_count == 3
 
 
+def test_around_is_inclusive_of_the_centre_seq(tmp_path):
+    from agentloom_runtime.session.transcript import TranscriptBlock, TranscriptDocument, TranscriptTurn
+
+    turns = [
+        TranscriptTurn(seq=i, role="human", blocks=[TranscriptBlock(type="text", text=f"t{i}")])
+        for i in range(1, 8)
+    ]
+    doc = TranscriptDocument(source_host="cursor", source_ref="x", turns=turns)
+    assert [t.seq for t in doc.around(4, radius=1).turns] == [3, 4, 5]
+
+
 def test_renderers_show_both_prose_and_tool_calls(tmp_path):
     doc = _doc(tmp_path)
     for rendered in (render_text(doc), render_markdown(doc)):

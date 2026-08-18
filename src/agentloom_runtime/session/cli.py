@@ -236,20 +236,99 @@ def cmd_transcripts(args: argparse.Namespace) -> int:
 def cmd_replay(args: argparse.Namespace) -> int:
     _, _, workspace_key = _identity(args)
     doc = store.load_transcript(
+        transcript_id=getattr(args, "id", None),
         source_ref=args.ref,
-        workspace_key=None if args.ref else workspace_key,
+        workspace_key=None if (args.ref or getattr(args, "id", None)) else workspace_key,
     )
     if doc is None:
         print("no archived transcript found. Run 'agentloom-session archive' first.")
         return 0
 
-    doc = doc.tail(args.last)
+    if args.around:
+        doc = doc.around(args.around, radius=args.radius)
+    elif args.last:
+        doc = doc.tail(args.last)
     if args.format == "json":
         print(json.dumps(doc.to_dict(), indent=2, ensure_ascii=False))
     elif args.format == "markdown":
         print(render_markdown(doc))
     else:
         print(render_text(doc))
+    return 0
+
+
+def _embed_fn(batch_size: int = 64):
+    from agentloom_runtime.memory.embedding_provider import embed_texts
+
+    def _run(texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            out.extend(embed_texts(texts[i : i + batch_size]))
+        return out
+
+    return _run
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    from agentloom_runtime.memory.embedding_provider import get_embedding_model
+
+    model = args.model or get_embedding_model()
+    embed_fn = None if args.no_embed else _embed_fn()
+    try:
+        stats = store.index_workspace(
+            workspace_key,
+            model=model,
+            embed_fn=embed_fn,
+            limit=0 if args.all else args.limit,
+        )
+    except RuntimeError as exc:
+        print(
+            f"error: {exc}\n"
+            "Embeddings need OPENAI_API_KEY. Re-run with --no-embed for a lexical-only index."
+        )
+        return 1
+    _emit(
+        stats,
+        f"indexed {stats['transcripts']} transcript(s) for {workspace_key}: "
+        f"{stats['chunks']} chunks, {stats['embedded']} embedded, "
+        f"{stats['unchanged']} unchanged",
+        args.json,
+    )
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    from agentloom_runtime.memory.embedding_provider import embed_query, get_embedding_model
+
+    model = get_embedding_model()
+    query_vec = None if args.lexical else embed_query(args.query, model=model)
+    hits = store.search_archive(
+        args.query,
+        workspace_key=workspace_key,
+        since=args.since,
+        limit=args.limit,
+        query_vec=query_vec,
+        model=model,
+    )
+    lines = []
+    for hit in hits:
+        lines.append(
+            f"{hit.score:.3f}  {hit.granularity:<7}  {hit.source_host}:{hit.source_ref}  "
+            f"seq {hit.seq_start}–{hit.seq_end}  {hit.captured_at or ''}"
+        )
+        if hit.snippet:
+            lines.append(f"      {hit.snippet}")
+        lines.append(
+            f"      replay: agentloom-session replay --ref {hit.source_ref} "
+            f"--around {hit.seq}"
+        )
+    _emit(
+        [h.to_dict() for h in hits],
+        "\n".join(lines) or "no matching conversations",
+        args.json,
+    )
     return 0
 
 
@@ -352,11 +431,30 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("replay", help="print an archived conversation")
     _add_common(p)
     p.add_argument("--ref", help="source reference (default: newest for this workspace)")
+    p.add_argument("--id", help="transcript id")
     p.add_argument("--last", type=int, default=0, help="only the last N turns (0 = all)")
+    p.add_argument("--around", type=int, help="centre seq from a search hit")
+    p.add_argument("--radius", type=int, default=10, help="turns either side of --around")
     p.add_argument(
         "--format", choices=["text", "markdown", "json"], default="text"
     )
     p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("index", help="build the search index over archived conversations")
+    _add_common(p)
+    p.add_argument("--all", action="store_true", help="index every archived transcript")
+    p.add_argument("--limit", type=int, default=50, help="newest N to index (ignored with --all)")
+    p.add_argument("--no-embed", action="store_true", help="lexical index only; skip embeddings")
+    p.add_argument("--model", help="embedding model name (default: EMBEDDING_MODEL)")
+    p.set_defaults(func=cmd_index)
+
+    p = sub.add_parser("search", help="find archived conversations by what was said")
+    _add_common(p)
+    p.add_argument("query", help="natural-language or keyword query")
+    p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--since", help="only conversations captured at or after this timestamp")
+    p.add_argument("--lexical", action="store_true", help="skip vector search")
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("turn", help="append a short turn summary")
     _add_common(p)

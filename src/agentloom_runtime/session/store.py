@@ -16,15 +16,24 @@ from typing import Any, Optional
 
 from agentloom_runtime.db import connect
 from agentloom_runtime.session.identity import HostContext
+from agentloom_runtime.session.index import (
+    ArchiveHit,
+    chunk_document,
+    hybrid_rank,
+    snippet as make_snippet,
+)
 from agentloom_runtime.session.transcript import TranscriptDocument
 
 __all__ = [
+    "ArchiveHit",
     "ResumePack",
     "SessionRecord",
     "TranscriptRecord",
     "add_turn",
     "checkpoint",
     "close_session",
+    "index_transcript",
+    "index_workspace",
     "list_checkpoints",
     "list_transcripts",
     "load_transcript",
@@ -32,6 +41,7 @@ __all__ = [
     "park_session",
     "render_resume_pack",
     "resume",
+    "search_archive",
     "search_sessions",
     "store_transcript",
 ]
@@ -632,6 +642,271 @@ def load_transcript(
         return TranscriptDocument.from_dict(payload)
     finally:
         conn.close()
+
+
+def _parse_embedding(value: Any) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(x) for x in value]
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return None
+        if isinstance(parsed, list):
+            return [float(x) for x in parsed]
+    return None
+
+
+def _load_transcript_row(
+    transcript_id: Optional[str] = None,
+    source_ref: Optional[str] = None,
+    workspace_key: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if transcript_id:
+        where, params = "WHERE transcript_id = ?", [transcript_id]
+    elif source_ref:
+        where, params = "WHERE source_ref = ?", [source_ref]
+    elif workspace_key:
+        where, params = "WHERE workspace_key = ?", [workspace_key]
+    else:
+        raise ValueError("one of transcript_id, source_ref, or workspace_key is required")
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            f"SELECT {_TRANSCRIPT_COLUMNS}, body_zlib FROM session_transcripts {where} "
+            "ORDER BY captured_at DESC LIMIT 1",
+            params,
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def index_transcript(
+    transcript_id: str,
+    *,
+    model: str,
+    embed_fn: Optional[Any] = None,
+) -> dict[str, int]:
+    """Chunk one archived conversation and upsert its index rows.
+
+    ``embed_fn`` maps a list of strings to a list of vectors. When omitted,
+    chunks are stored with NULL embeddings and lexical search still works.
+    Re-indexing is cheap: unchanged content hashes skip both rewrite and embed.
+    """
+    row = _load_transcript_row(transcript_id=transcript_id)
+    if row is None or row.get("body_zlib") is None:
+        return {"chunks": 0, "embedded": 0, "unchanged": 0}
+
+    doc = TranscriptDocument.from_dict(
+        json.loads(zlib.decompress(row["body_zlib"]).decode("utf-8"))
+    )
+    chunks = chunk_document(doc)
+    captured_at = row["captured_at"]
+    workspace_key = row["workspace_key"]
+    source_host = row["source_host"]
+    source_ref = row["source_ref"]
+
+    conn = connect()
+    try:
+        existing_rows = conn.execute(
+            "SELECT chunk_id, granularity, seq_start, seq_end, content_sha256, embedding "
+            "FROM session_transcript_chunks "
+            "WHERE transcript_id = ? AND embedding_model = ?",
+            [transcript_id, model],
+        ).fetchall()
+        existing = {
+            (r["granularity"], int(r["seq_start"]), int(r["seq_end"])): r
+            for r in existing_rows
+        }
+
+        wanted_keys = {(c.granularity, c.seq_start, c.seq_end) for c in chunks}
+        stale = [r["chunk_id"] for key, r in existing.items() if key not in wanted_keys]
+        if stale:
+            placeholders = ",".join("?" * len(stale))
+            conn.execute(
+                f"DELETE FROM session_transcript_chunks WHERE chunk_id IN ({placeholders})",
+                stale,
+            )
+
+        to_embed: list[tuple[str, str]] = []  # (chunk_id, content)
+        unchanged = 0
+        for chunk in chunks:
+            key = (chunk.granularity, chunk.seq_start, chunk.seq_end)
+            prev = existing.get(key)
+            if prev and prev["content_sha256"] == chunk.content_sha256:
+                has_vec = prev["embedding"] is not None
+                if has_vec or embed_fn is None:
+                    unchanged += 1
+                    continue
+                to_embed.append((prev["chunk_id"], chunk.content))
+                continue
+
+            chunk_id = prev["chunk_id"] if prev else str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO session_transcript_chunks
+                    (chunk_id, transcript_id, workspace_key, source_host, source_ref,
+                     granularity, seq_start, seq_end, captured_at, content,
+                     content_sha256, embedding, embedding_model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                ON DUPLICATE KEY UPDATE
+                    workspace_key = VALUES(workspace_key),
+                    source_host = VALUES(source_host),
+                    source_ref = VALUES(source_ref),
+                    captured_at = VALUES(captured_at),
+                    content = VALUES(content),
+                    content_sha256 = VALUES(content_sha256),
+                    embedding = NULL
+                """,
+                [
+                    chunk_id,
+                    transcript_id,
+                    workspace_key,
+                    source_host,
+                    source_ref,
+                    chunk.granularity,
+                    chunk.seq_start,
+                    chunk.seq_end,
+                    captured_at,
+                    chunk.content,
+                    chunk.content_sha256,
+                    model,
+                ],
+            )
+            to_embed.append((chunk_id, chunk.content))
+
+        embedded = 0
+        if embed_fn and to_embed:
+            vectors = embed_fn([content for _, content in to_embed])
+            if len(vectors) != len(to_embed):
+                raise RuntimeError(
+                    f"embed_fn returned {len(vectors)} vectors for {len(to_embed)} chunks"
+                )
+            for (chunk_id, _), vector in zip(to_embed, vectors):
+                conn.execute(
+                    "UPDATE session_transcript_chunks SET embedding = ? WHERE chunk_id = ?",
+                    [json.dumps(vector), chunk_id],
+                )
+                embedded += 1
+
+        conn.commit()
+        return {
+            "chunks": len(chunks),
+            "embedded": embedded,
+            "unchanged": unchanged,
+            "deleted": len(stale),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def index_workspace(
+    workspace_key: str,
+    *,
+    model: str,
+    embed_fn: Optional[Any] = None,
+    limit: int = 0,
+) -> dict[str, int]:
+    """Index every archived conversation for a workspace."""
+    records = list_transcripts(workspace_key=workspace_key, limit=limit or 10_000)
+    totals = {"transcripts": 0, "chunks": 0, "embedded": 0, "unchanged": 0, "deleted": 0}
+    for record in records:
+        stats = index_transcript(record.transcript_id, model=model, embed_fn=embed_fn)
+        totals["transcripts"] += 1
+        for key in ("chunks", "embedded", "unchanged", "deleted"):
+            totals[key] += stats.get(key, 0)
+    return totals
+
+
+def search_archive(
+    query: str,
+    *,
+    workspace_key: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 8,
+    query_vec: Optional[list[float]] = None,
+    model: Optional[str] = None,
+) -> list[ArchiveHit]:
+    """Locate conversations. Returns pointers; does not load transcript bodies."""
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if workspace_key:
+        clauses.append("workspace_key = ?")
+        params.append(workspace_key)
+    if since:
+        clauses.append("captured_at >= ?")
+        params.append(since)
+    if model:
+        clauses.append("embedding_model = ?")
+        params.append(model)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT chunk_id, transcript_id, workspace_key, source_host, source_ref,
+                   granularity, seq_start, seq_end, captured_at, content, embedding
+            FROM session_transcript_chunks
+            {where}
+            """,
+            params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                "id": row["chunk_id"],
+                "transcript_id": row["transcript_id"],
+                "workspace_key": row["workspace_key"],
+                "source_host": row["source_host"],
+                "source_ref": row["source_ref"],
+                "granularity": row["granularity"],
+                "seq_start": int(row["seq_start"]),
+                "seq_end": int(row["seq_end"]),
+                "captured_at": _iso(row["captured_at"]),
+                "content": row["content"] or "",
+                "embedding": _parse_embedding(row["embedding"]),
+            }
+        )
+
+    ranked = hybrid_rank(query, items, query_vec=query_vec, limit=limit)
+    hits: list[ArchiveHit] = []
+    for item in ranked:
+        hits.append(
+            ArchiveHit(
+                chunk_id=item["id"],
+                transcript_id=item["transcript_id"],
+                source_host=item["source_host"],
+                source_ref=item["source_ref"],
+                workspace_key=item["workspace_key"],
+                granularity=item["granularity"],
+                seq_start=item["seq_start"],
+                seq_end=item["seq_end"],
+                captured_at=item.get("captured_at"),
+                score=float(item["score"]),
+                snippet=make_snippet(item.get("content") or "", query),
+                search_mode=item.get("search_mode", "hybrid"),
+                content=item.get("content") or "",
+            )
+        )
+    return hits
 
 
 def render_resume_pack(pack: Optional[ResumePack]) -> str:

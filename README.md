@@ -43,11 +43,13 @@ mysql ... < migrations/mysql/002_memory_embeddings.sql
 mysql ... < migrations/mysql/003_kg_graph.sql
 mysql ... < migrations/mysql/004_session_memory.sql
 mysql ... < migrations/mysql/005_session_transcripts.sql
+mysql ... < migrations/mysql/006_session_transcript_index.sql
 ```
 
 `004_session_memory.sql` is standalone: apply it on its own if you only want
 Layer 0 session continuity. `005_session_transcripts.sql` adds the conversation
-archive and requires 004.
+archive (requires 004). `006_session_transcript_index.sql` adds the archive
+locator (requires 005).
 
 Configure connection:
 
@@ -132,8 +134,15 @@ the actual conversation behind one, the archive holds it:
 
 ```bash
 agentloom-session archive --all      # capture this host's conversations (read-only)
-agentloom-session replay --last 20   # read the most recent one back
+agentloom-session index --all        # locate later: prose windows + optional embeddings
+agentloom-session search "password policy"
+agentloom-session replay --ref <id> --around 14
 ```
+
+The locator indexes human and agent prose only (tool-call noise is dropped), at
+two granularities, and ranks with hybrid lexical + vector search. It returns
+pointers; `replay --around` pages the archive at that seq. Durable decisions
+still belong in the knowledge graph — this finds the discussion.
 
 Conversations are captured by per-host read-only readers, redacted for
 credential-shaped content before storage, and rendered as text, Markdown, or

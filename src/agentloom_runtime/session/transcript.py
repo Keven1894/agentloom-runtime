@@ -198,6 +198,23 @@ class TranscriptDocument:
             redaction_count=self.redaction_count,
         )
 
+    def around(self, seq: int, radius: int = 10) -> "TranscriptDocument":
+        """Keep turns whose seq is within ``radius`` of ``seq`` (inclusive).
+
+        Search hits return a seq range; this is how you page the archive at
+        that location without loading the whole conversation into context.
+        """
+        if radius < 0:
+            raise ValueError("radius must be >= 0")
+        lo, hi = seq - radius, seq + radius
+        turns = [t for t in self.turns if lo <= t.seq <= hi]
+        return TranscriptDocument(
+            source_host=self.source_host,
+            source_ref=self.source_ref,
+            turns=turns,
+            redaction_count=self.redaction_count,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": 1,

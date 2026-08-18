@@ -59,6 +59,14 @@
   remains out of scope: it requires writing an undocumented, path-keyed store
   that the running editor holds open.
 
+- **Layer 0 archive locator** — find a discussion without loading the whole
+  conversation. `migrations/mysql/006_session_transcript_index.sql` stores
+  session-level nodes plus overlapping prose windows (human/agent text only).
+  `agentloom-session index` / `search` rank with hybrid lexical + vector RRF and
+  return `(source_ref, seq)` pointers; `replay --around` pages the archive.
+  Embeddings are optional (`--no-embed` is a lexical-only index). Time is a
+  filter column (`--since`), not a cosine side-effect.
+
 ### Documentation
 
 - `docs/memory/layer-0-session-memory.md` — separates the four problems behind
