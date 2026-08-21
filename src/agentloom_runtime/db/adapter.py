@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Iterator, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlparse
+
+from agentloom_runtime.config import load_env
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class DatabaseSettings:
 
 def get_database_settings() -> DatabaseSettings:
     """Read MySQL settings from environment variables."""
+    load_env()
     database_url = os.environ.get("DATABASE_URL") or os.environ.get("AGENTLOOM_DATABASE_URL")
     if database_url:
         parsed = urlparse(database_url)
@@ -59,16 +62,42 @@ def get_database_settings() -> DatabaseSettings:
 
 
 class HybridRow(dict):
-    """Row object supporting both dict and integer-index access."""
+    """A result row addressable by column name, position, or slice.
+
+    Iteration yields **values**, matching ``sqlite3.Row`` and the DB-API rather
+    than ``dict``. Inheriting dict's key iteration would make the most ordinary
+    line in database code::
+
+        for schema, table in cursor.fetchall():
+
+    bind the column *names* to those variables — no exception, just wrong data
+    that looks right until something downstream tries to do arithmetic on it.
+
+    Key-based membership is preserved, so ``"col" in row`` still asks whether
+    the column exists. Use ``row.values()`` or ``in tuple(row)`` to test values.
+    """
 
     def __init__(self, columns: Sequence[str], values: Sequence[Any]):
         super().__init__(zip(columns, values))
         self._values = tuple(values)
 
     def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, int):
+        if isinstance(key, (int, slice)):
             return self._values[key]
         return super().__getitem__(key)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __contains__(self, key: Any) -> bool:
+        # Deliberately still key-based: `"column" in row` is the useful question.
+        return dict.__contains__(self, key)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self):  # noqa: D102 - dict protocol, kept for ``dict(row)`` / ``**row``
+        return dict.keys(self)
 
 
 def _translate_placeholders(sql: str) -> str:

@@ -5,35 +5,17 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from pathlib import Path
 from typing import Iterable
+
+from agentloom_runtime.config import load_env
 
 logger = logging.getLogger("agentloom-runtime.memory.embedding")
 
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
-@lru_cache(maxsize=1)
-def _load_env() -> None:
-    env_file = os.environ.get("AGENTLOOM_ENV_FILE")
-    env_path = Path(env_file) if env_file else None
-    if env_path and env_path.is_file():
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(env_path, override=False)
-        except Exception:
-            pass
-
-
 def get_embedding_model() -> str:
-    _load_env()
+    load_env()
     return os.environ.get("EMBEDDING_MODEL") or os.environ.get(
         "OPENAI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
     )
@@ -41,7 +23,7 @@ def get_embedding_model() -> str:
 
 @lru_cache(maxsize=1)
 def _get_openai_client():
-    _load_env()
+    load_env()
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         return None

@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from agentloom_runtime.db import DatabaseSettings, get_database_settings
+from agentloom_runtime.db import DatabaseSettings, HybridRow, get_database_settings
 
 
 def test_get_database_settings_from_agentloom_env(monkeypatch):
@@ -36,6 +36,47 @@ def test_get_database_settings_from_database_url(monkeypatch):
     assert settings.host == "db.example.com"
     assert settings.database == "app_db"
     assert settings.port == 3306
+
+
+# --------------------------------------------------------------------------
+# HybridRow — addressable three ways, and iterable the way DB-API code expects
+# --------------------------------------------------------------------------
+
+
+def _row() -> HybridRow:
+    return HybridRow(["schema", "table", "rows"], ["agentloom_prod", "agent_sessions", 2])
+
+
+def test_row_is_addressable_by_name_and_position():
+    row = _row()
+    assert row["schema"] == "agentloom_prod"
+    assert row[0] == "agentloom_prod"
+    assert row[-1] == 2
+    assert row[0:2] == ("agentloom_prod", "agent_sessions")
+
+
+def test_unpacking_a_row_yields_values_not_column_names():
+    """The bug this guards against produces wrong data, not an error.
+
+    ``dict`` iterates keys, so unpacking a dict-derived row bound column names
+    to the variables and everything downstream looked plausible.
+    """
+    schema, table, rows = _row()
+    assert (schema, table, rows) == ("agentloom_prod", "agent_sessions", 2)
+    assert list(_row()) == ["agentloom_prod", "agent_sessions", 2]
+
+
+def test_row_still_behaves_as_a_mapping():
+    row = _row()
+    assert "schema" in row, "membership stays key-based: 'is there such a column'"
+    assert dict(row) == {
+        "schema": "agentloom_prod",
+        "table": "agent_sessions",
+        "rows": 2,
+    }
+    assert {**row}["table"] == "agent_sessions"
+    assert sorted(row.keys()) == ["rows", "schema", "table"]
+    assert len(row) == 3
 
 
 def test_connect_blocks_prod_db_in_pytest(monkeypatch):
