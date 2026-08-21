@@ -98,8 +98,9 @@ highest one your host supports; the lower ones remain available.
 | Surface | Requires | Use when |
 |---|---|---|
 | **CLI** (`agentloom-session`) | a shell | always available — this is the portability floor |
+| **MCP** (`agentloom-session-mcp`) | an MCP-capable host | coding agents dynamically querying past context and lineage |
+| **Web UI** (`agentloom-session ui`) | browser / localhost | humans inspecting session DAGs, transcripts, and checkpoints |
 | **Python API** (`agentloom_runtime.session`) | Python in-process | building a service or a richer integration |
-| **MCP** (planned) | an MCP-capable host | the host speaks MCP and you want tool-call ergonomics |
 
 Every AI coding host can run a shell command. That is why the CLI is the floor
 and why no feature may be CLI-inaccessible.
@@ -113,12 +114,19 @@ agentloom-session resume       # print the resume pack
 agentloom-session checkpoint --next "Apply the migration to dev" --plan docs/plan/x.md
 agentloom-session park         # pause; frees the identity's open slot
 
+agentloom-session open --fork-from <id> --reason host_switch   # branch session into DAG
+agentloom-session tree         # render ASCII DAG session hierarchy
+agentloom-session lineage      # inspect session ancestry and child branches
+
 agentloom-session archive --all      # capture this host's conversations
 agentloom-session transcripts        # list what is archived for this workspace
 agentloom-session replay --last 20   # read the most recent conversation back
 agentloom-session index --all        # build the archive locator (prose chunks + embeddings)
 agentloom-session search "password policy"   # pointers into the archive
 # then: agentloom-session replay --ref <id> --around <seq>
+
+agentloom-session mcp          # run stdio JSON-RPC MCP server
+agentloom-session ui           # launch local web dashboard on port 8766
 ```
 
 ## Host adapter contract

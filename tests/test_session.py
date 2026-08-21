@@ -104,10 +104,19 @@ def test_session_layer_never_touches_a_hosts_private_chat_store():
 
 
 def test_session_layer_carries_no_deployment_identity():
-    """The public runtime stays framework-only: no institution or instance names."""
-    forbidden = re.compile(r"fiu\.edu|envita_prod|10\.100\.118\.\d+", re.IGNORECASE)
+    """The public runtime stays framework-only: no institution or instance names.
+
+    Agent and operator names belong to a deployment, not to the framework. A
+    hardcoded default is worse than a missing one: it does not fail, it quietly
+    reads some other identity's session.
+    """
+    forbidden = re.compile(
+        r"fiu\.edu|envita_prod|10\.100\.118\.\d+|envita-\w+|\bbguan\b",
+        re.IGNORECASE,
+    )
     for name, source in _sources().items():
-        assert not forbidden.search(source), f"{name} leaks deployment-specific identity"
+        match = forbidden.search(source)
+        assert not match, f"{name} leaks deployment-specific identity: {match.group(0)!r}"
 
 
 def test_schema_keeps_hint_columns_out_of_lookup_indexes():
@@ -214,3 +223,55 @@ def test_missing_session_renders_a_usable_message():
 def test_host_context_is_only_provenance():
     host = HostContext(host_hint="h", ide_hint="i", workspace_path_hint="p")
     assert (host.host_hint, host.ide_hint, host.workspace_path_hint) == ("h", "i", "p")
+
+
+def test_session_record_supports_dag_lineage_fields():
+    rec = SessionRecord(
+        session_id="s-child",
+        agent_id="test-agent",
+        operator_id="test-op",
+        workspace_key="github.com/acme/widget",
+        status="open",
+        parent_session_id="s-parent",
+        fork_checkpoint_id="cp-123",
+        fork_reason="host_switch",
+        title="Child session",
+    )
+    d = rec.to_dict()
+    assert d["parent_session_id"] == "s-parent"
+    assert d["fork_checkpoint_id"] == "cp-123"
+    assert d["fork_reason"] == "host_switch"
+    from_d = SessionRecord.from_row(d)
+    assert from_d.parent_session_id == "s-parent"
+    assert from_d.fork_checkpoint_id == "cp-123"
+    assert from_d.fork_reason == "host_switch"
+
+
+def test_cli_render_tree_node():
+    from agentloom_runtime.session.cli import _render_tree_node
+
+    root = {
+        "session_id": "11111111-0000-0000-0000-000000000000",
+        "agent_id": "envita-builder",
+        "operator_id": "alice",
+        "status": "parked",
+        "title": "Root task",
+        "children": [
+            {
+                "session_id": "22222222-0000-0000-0000-000000000000",
+                "agent_id": "envita-builder",
+                "operator_id": "alice",
+                "status": "open",
+                "title": "Child continuation",
+                "fork_reason": "host_switch",
+                "children": [],
+            }
+        ],
+    }
+    lines = _render_tree_node(root)
+    assert len(lines) == 2
+    assert "11111111" in lines[0]
+    assert "Root task" in lines[0]
+    assert "22222222" in lines[1]
+    assert "forked: host_switch" in lines[1]
+

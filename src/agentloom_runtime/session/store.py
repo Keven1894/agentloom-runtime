@@ -32,6 +32,8 @@ __all__ = [
     "add_turn",
     "checkpoint",
     "close_session",
+    "get_session_lineage",
+    "get_workspace_session_tree",
     "index_transcript",
     "index_workspace",
     "list_checkpoints",
@@ -49,8 +51,9 @@ __all__ = [
 CHECKPOINT_SCHEMA_VERSION = 1
 
 _SESSION_COLUMNS = (
-    "session_id, agent_id, operator_id, workspace_key, status, title, "
-    "workspace_path_hint, host_hint, ide_hint, created_at, updated_at, last_checkpoint_at"
+    "session_id, agent_id, operator_id, workspace_key, parent_session_id, "
+    "fork_checkpoint_id, fork_reason, status, title, workspace_path_hint, "
+    "host_hint, ide_hint, created_at, updated_at, last_checkpoint_at"
 )
 
 _CHECKPOINT_COLUMNS = (
@@ -88,6 +91,9 @@ class SessionRecord:
     operator_id: str
     workspace_key: str
     status: str
+    parent_session_id: Optional[str] = None
+    fork_checkpoint_id: Optional[str] = None
+    fork_reason: Optional[str] = None
     title: Optional[str] = None
     workspace_path_hint: Optional[str] = None
     host_hint: Optional[str] = None
@@ -104,6 +110,9 @@ class SessionRecord:
             operator_id=row["operator_id"],
             workspace_key=row["workspace_key"],
             status=row["status"],
+            parent_session_id=row.get("parent_session_id") if isinstance(row, dict) else (row["parent_session_id"] if "parent_session_id" in row else None),
+            fork_checkpoint_id=row.get("fork_checkpoint_id") if isinstance(row, dict) else (row["fork_checkpoint_id"] if "fork_checkpoint_id" in row else None),
+            fork_reason=row.get("fork_reason") if isinstance(row, dict) else (row["fork_reason"] if "fork_reason" in row else None),
             title=row["title"],
             workspace_path_hint=row["workspace_path_hint"],
             host_hint=row["host_hint"],
@@ -158,6 +167,9 @@ def open_session(
     workspace_key: str,
     title: Optional[str] = None,
     host: Optional[HostContext] = None,
+    parent_session_id: Optional[str] = None,
+    fork_checkpoint_id: Optional[str] = None,
+    fork_reason: Optional[str] = None,
 ) -> tuple[SessionRecord, bool]:
     """Return the open session for this identity, creating it if absent.
 
@@ -168,23 +180,46 @@ def open_session(
     conn = connect()
     try:
         existing = _find_open(conn, agent_id, operator_id, workspace_key)
+        if existing and parent_session_id:
+            conn.execute(
+                "UPDATE agent_sessions SET status = 'parked' WHERE session_id = ?",
+                [existing["session_id"]],
+            )
+            conn.commit()
+            existing = None
+
         if existing:
             return SessionRecord.from_row(existing), False
+
+        if parent_session_id and not fork_checkpoint_id:
+            cp_row = conn.execute(
+                "SELECT checkpoint_id FROM session_checkpoints "
+                "WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+                [parent_session_id],
+            ).fetchone()
+            if cp_row:
+                fork_checkpoint_id = cp_row["checkpoint_id"]
+            if not fork_reason:
+                fork_reason = "continuation"
 
         session_id = str(uuid.uuid4())
         try:
             conn.execute(
                 """
                 INSERT INTO agent_sessions
-                    (session_id, agent_id, operator_id, workspace_key, status, title,
-                     workspace_path_hint, host_hint, ide_hint)
-                VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?)
+                    (session_id, agent_id, operator_id, workspace_key,
+                     parent_session_id, fork_checkpoint_id, fork_reason,
+                     status, title, workspace_path_hint, host_hint, ide_hint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
                 """,
                 [
                     session_id,
                     agent_id,
                     operator_id,
                     workspace_key,
+                    parent_session_id,
+                    fork_checkpoint_id,
+                    fork_reason,
                     title,
                     host.workspace_path_hint if host else None,
                     host.host_hint if host else None,
@@ -443,6 +478,74 @@ def park_session(session_id: str) -> bool:
 
 def close_session(session_id: str) -> bool:
     return _set_status(session_id, "closed")
+
+
+def get_session_lineage(session_id: str) -> dict[str, Any]:
+    """Retrieve ancestor chain, current session, and direct child sessions."""
+    conn = connect()
+    try:
+        current = _fetch_session(conn, session_id)
+        if current is None:
+            raise ValueError(f"session not found: {session_id}")
+
+        ancestors: list[dict[str, Any]] = []
+        curr_parent_id = current.parent_session_id
+        visited = {session_id}
+        while curr_parent_id and curr_parent_id not in visited:
+            visited.add(curr_parent_id)
+            parent = _fetch_session(conn, curr_parent_id)
+            if parent is None:
+                break
+            ancestors.append(parent.to_dict())
+            curr_parent_id = parent.parent_session_id
+
+        child_rows = conn.execute(
+            f"""
+            SELECT {_SESSION_COLUMNS} FROM agent_sessions
+            WHERE parent_session_id = ?
+            ORDER BY created_at ASC
+            """,
+            [session_id],
+        ).fetchall()
+        children = [SessionRecord.from_row(r).to_dict() for r in child_rows]
+
+        return {
+            "session": current.to_dict(),
+            "ancestors": ancestors,
+            "children": children,
+        }
+    finally:
+        conn.close()
+
+
+def get_workspace_session_tree(workspace_key: str) -> list[dict[str, Any]]:
+    """Return the hierarchical DAG of all sessions in a workspace."""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT {_SESSION_COLUMNS} FROM agent_sessions
+            WHERE workspace_key = ?
+            ORDER BY created_at ASC
+            """,
+            [workspace_key],
+        ).fetchall()
+        sessions = [SessionRecord.from_row(r).to_dict() for r in rows]
+
+        session_map: dict[str, dict[str, Any]] = {
+            s["session_id"]: {**s, "children": []} for s in sessions
+        }
+        roots: list[dict[str, Any]] = []
+        for s in sessions:
+            sid = s["session_id"]
+            pid = s.get("parent_session_id")
+            if pid and pid in session_map:
+                session_map[pid]["children"].append(session_map[sid])
+            else:
+                roots.append(session_map[sid])
+        return roots
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

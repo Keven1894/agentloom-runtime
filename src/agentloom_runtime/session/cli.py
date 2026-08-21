@@ -34,7 +34,7 @@ def _identity(args: argparse.Namespace) -> tuple[str, str, str]:
     if not agent_id:
         raise SystemExit(
             "error: no agent id. Pass --agent or set AGENTLOOM_AGENT_ID "
-            "(e.g. AGENTLOOM_AGENT_ID=envita-builder)."
+            "(e.g. AGENTLOOM_AGENT_ID=my-agent)."
         )
     operator_id = resolve_operator_id(args.operator)
     workspace_key = args.workspace or detect_workspace_key(Path(args.path) if args.path else None)
@@ -88,12 +88,22 @@ def cmd_open(args: argparse.Namespace) -> int:
     agent_id, operator_id, workspace_key = _identity(args)
     host = detect_host_context(Path(args.path) if args.path else None)
     session, created = store.open_session(
-        agent_id, operator_id, workspace_key, title=args.title, host=host
+        agent_id,
+        operator_id,
+        workspace_key,
+        title=args.title,
+        host=host,
+        parent_session_id=getattr(args, "fork_from", None),
+        fork_checkpoint_id=getattr(args, "checkpoint", None),
+        fork_reason=getattr(args, "reason", None),
     )
     verb = "opened" if created else "reusing open"
+    msg = f"{verb} session {session.session_id} for {workspace_key}"
+    if session.parent_session_id:
+        msg += f" (forked from {session.parent_session_id[:8]}.. reason: {session.fork_reason})"
     _emit(
         {"created": created, "session": session.to_dict()},
-        f"{verb} session {session.session_id} for {workspace_key}",
+        msg,
         args.json,
     )
     return 0
@@ -371,6 +381,96 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_tree_node(node: dict[str, Any], prefix: str = "", is_last: bool = True) -> list[str]:
+    lines = []
+    connector = "└── " if is_last else "├── "
+    s = node
+    status_tag = f"[{s.get('status', 'open')}]"
+    title_part = f" - {s['title']}" if s.get("title") else ""
+    reason_part = f" (forked: {s['fork_reason']})" if s.get("fork_reason") else ""
+    line = f"{prefix}{connector}{status_tag} {s['session_id'][:8]}.. ({s.get('operator_id')} @ {s.get('agent_id')}){title_part}{reason_part}"
+    lines.append(line)
+
+    children = node.get("children", [])
+    child_prefix = prefix + ("    " if is_last else "│   ")
+    for i, child in enumerate(children):
+        lines.extend(_render_tree_node(child, child_prefix, is_last=(i == len(children) - 1)))
+    return lines
+
+
+def cmd_tree(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    roots = store.get_workspace_session_tree(workspace_key)
+    if args.json:
+        _emit(roots, "", True)
+        return 0
+
+    if not roots:
+        print(f"No sessions found for workspace: {workspace_key}")
+        return 0
+
+    lines = [f"Session DAG for workspace: {workspace_key}"]
+    for i, root in enumerate(roots):
+        lines.extend(_render_tree_node(root, "", is_last=(i == len(roots) - 1)))
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_lineage(args: argparse.Namespace) -> int:
+    session_id = _resolve_session_id(args)
+    lineage = store.get_session_lineage(session_id)
+    if args.json:
+        _emit(lineage, "", True)
+        return 0
+
+    cur = lineage["session"]
+    lines = [
+        f"Session: {cur['session_id']} [{cur['status']}]",
+        f"  Agent:     {cur['agent_id']}",
+        f"  Operator:  {cur['operator_id']}",
+        f"  Workspace: {cur['workspace_key']}",
+    ]
+    if cur.get("fork_reason"):
+        lines.append(f"  Fork Reason:     {cur['fork_reason']}")
+    if cur.get("fork_checkpoint_id"):
+        lines.append(f"  Fork Checkpoint: {cur['fork_checkpoint_id']}")
+
+    ancestors = lineage.get("ancestors", [])
+    if ancestors:
+        lines.append("\nAncestors (oldest to newest parent):")
+        for anc in reversed(ancestors):
+            lines.append(f"  ▲ {anc['session_id'][:8]}.. [{anc['status']}] ({anc['agent_id']}) {anc.get('title') or ''}")
+    else:
+        lines.append("\nAncestors: (root session, no parent)")
+
+    children = lineage.get("children", [])
+    if children:
+        lines.append("\nDirect Child Forks:")
+        for ch in children:
+            lines.append(f"  ▼ {ch['session_id'][:8]}.. [{ch['status']}] ({ch['agent_id']}) [reason: {ch.get('fork_reason') or 'none'}] {ch.get('title') or ''}")
+    else:
+        lines.append("\nDirect Child Forks: (none)")
+
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from agentloom_runtime.session.mcp import run_stdio_server
+
+    return run_stdio_server()
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    from agentloom_runtime.session.ui import run_server
+
+    return run_server(
+        host=args.host,
+        port=args.port,
+        open_browser=not args.no_browser,
+    )
+
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", help=f"agent id (default: ${DEFAULT_AGENT_ENV})")
     parser.add_argument("--operator", help="operator id (default: $AGENTLOOM_OPERATOR_ID or OS user)")
@@ -393,7 +493,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("open", help="open (or reuse) a session for this identity")
     _add_common(p)
     p.add_argument("--title", help="short session title")
+    p.add_argument("--fork-from", dest="fork_from", help="parent session id to fork from")
+    p.add_argument("--checkpoint", help="checkpoint id to fork from (default: latest of parent)")
+    p.add_argument("--reason", help="fork reason (e.g. host_switch, subtask_branch, continuation)")
     p.set_defaults(func=cmd_open)
+
+    p = sub.add_parser("tree", help="show session DAG hierarchy for this workspace")
+    _add_common(p)
+    p.set_defaults(func=cmd_tree)
+
+    p = sub.add_parser("lineage", help="show ancestry and child forks for a session")
+    _add_common(p)
+    p.add_argument("--session", help="explicit session id (default: this identity's open session)")
+    p.set_defaults(func=cmd_lineage)
 
     p = sub.add_parser("resume", help="print the resume pack for this identity")
     _add_common(p)
@@ -478,6 +590,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("--session", help="explicit session id")
     p.set_defaults(func=cmd_close)
+
+    p = sub.add_parser("mcp", help="run the Model Context Protocol (MCP) server over stdio")
+    p.set_defaults(func=cmd_mcp)
+
+    p = sub.add_parser("ui", help="launch the Layer 0 Session Viewer web UI")
+    p.add_argument("--host", default="127.0.0.1", help="server host (default: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8766, help="server port (default: 8766)")
+    p.add_argument("--no-browser", action="store_true", help="do not open browser automatically")
+    p.set_defaults(func=cmd_ui)
 
     return parser
 

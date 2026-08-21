@@ -67,6 +67,61 @@
   Embeddings are optional (`--no-embed` is a lexical-only index). Time is a
   filter column (`--since`), not a cosine side-effect.
 
+- **Layer 0 session DAG & lineage** — explicit directed acyclic graph (DAG) topology
+  across sessions and hosts.
+  - `migrations/mysql/007_session_lineage.sql` — adds `parent_session_id`,
+    `fork_checkpoint_id`, and `fork_reason` to `agent_sessions` with `ON DELETE SET NULL`.
+  - `agentloom-session open --fork-from <id> --reason <reason>` branches sessions
+    across machines or subtasks; `agentloom-session tree` / `lineage` renders the DAG.
+  - `store.get_session_lineage()` and `store.get_workspace_session_tree()`.
+
+- **Layer 0 MCP server (`agentloom-session-mcp`)** — active on-demand memory retrieval
+  for AI coding agents in any IDE.
+  - Stdio JSON-RPC 2.0 server with tools: `session_search`, `session_get_context`,
+    `session_get_checkpoint`, `session_get_lineage`.
+  - Agents dynamically query past decisions and page conversation turns without
+    token-dumping entire chat histories into context upfront.
+
+- **Layer 0 Session Web Viewer** — zero-dependency local graphical interface.
+  - `agentloom-session ui [--host 127.0.0.1] [--port 8766]` launches a standalone
+    threaded HTTP server with embedded reactive single-page viewer.
+  - Visualizes session DAG trees, interactive conversation transcripts with collapsible
+    tool cards, instant hybrid search, and one-click "Continue in IDE" fork commands.
+
+- **`agentloom_runtime.config`** — one environment loader for the whole package.
+  A `.env` file fills gaps only; a variable already in the process environment
+  always wins, so injected configuration beats a file on disk. Discovery walks
+  up from the working directory, and `AGENTLOOM_ENV_FILE` pins it for services
+  whose working directory is not the repository.
+
+### Fixed
+
+- Vector search reached the database but never the query. The adapter and the
+  embedding provider each discovered configuration by their own rules, so a
+  deployment could hold a fully embedded archive while every search silently
+  degraded to lexical-only — plausible-looking results, worse ranking, no
+  error. Both now share `agentloom_runtime.config`.
+- `session_search` (MCP) passed `lexical_only` to `store.search_archive`, which
+  takes a precomputed `query_vec`. Every call failed at runtime. The tool now
+  embeds the query the way the CLI does, and honours `lexical_only` by skipping
+  embedding rather than discarding it.
+- `session_get_lineage` (MCP) required a `session_id` that a resuming agent has
+  no way to know. It now falls back to the caller's own session.
+- The session web viewer ignored `limit` on `/api/transcripts` and `/api/search`
+  and never computed a query vector, so the human-facing surface was capped at
+  hardcoded page sizes and searched lexically against an embedded archive.
+
+### Changed
+
+- The MCP server no longer defaults `agent_id`/`operator_id` to any particular
+  deployment's names. An unset `AGENTLOOM_AGENT_ID` is reported as
+  configuration to supply; guessing would quietly read another identity's
+  session and answer confidently from it. The host-neutrality test now fails on
+  agent and operator names, not only hostnames and IP ranges.
+- MCP and viewer tests bind `autospec=True`. A bare `MagicMock` accepts any
+  argument, which is how a tool calling the store with a parameter the store
+  does not have passed its tests and failed on first real use.
+
 ### Documentation
 
 - `docs/memory/layer-0-session-memory.md` — separates the four problems behind

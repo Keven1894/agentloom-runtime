@@ -39,6 +39,7 @@ embeddings = [
 
 [project.scripts]
 agentloom-session = "agentloom_runtime.session.cli:main"
+agentloom-session-mcp = "agentloom_runtime.session.mcp:main"
 agentloom-hostrules = "agentloom_runtime.hostrules.cli:main"
 
 [project.urls]

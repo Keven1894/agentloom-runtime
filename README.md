@@ -44,12 +44,14 @@ mysql ... < migrations/mysql/003_kg_graph.sql
 mysql ... < migrations/mysql/004_session_memory.sql
 mysql ... < migrations/mysql/005_session_transcripts.sql
 mysql ... < migrations/mysql/006_session_transcript_index.sql
+mysql ... < migrations/mysql/007_session_lineage.sql
 ```
 
 `004_session_memory.sql` is standalone: apply it on its own if you only want
 Layer 0 session continuity. `005_session_transcripts.sql` adds the conversation
 archive (requires 004). `006_session_transcript_index.sql` adds the archive
-locator (requires 005).
+locator (requires 005). `007_session_lineage.sql` adds session DAG topology
+(requires 004).
 
 Configure connection:
 
@@ -69,6 +71,39 @@ export OPENAI_API_KEY=...
 export EMBEDDING_MODEL=text-embedding-3-small
 pip install -e ".[dev,embeddings]"
 ```
+
+### Where configuration comes from
+
+Every module resolves configuration through `agentloom_runtime.config`, so the
+database adapter and the embedding provider can never disagree about where
+settings live. Precedence:
+
+1. The process environment. A variable already set always wins.
+2. `AGENTLOOM_ENV_FILE`, if set — use this when a service or scheduled task
+   runs outside the repository directory.
+3. Otherwise a `.env` found by walking up from the working directory.
+
+A `.env` only fills gaps, so a stray file cannot override injected production
+configuration.
+
+> Put `OPENAI_API_KEY` where the *runtime* will find it, not only where your
+> indexing job found it. If the key resolves at index time but not at query
+> time, the archive embeds fine and every search quietly falls back to
+> lexical-only: no error, plausible results, worse ranking.
+
+### Verify the install
+
+The `agentloom-session` commands are console scripts. If they are missing, the
+bootstrap instructions given to agents silently do nothing:
+
+```bash
+agentloom-session --help          # console script must resolve on PATH
+python -c "import agentloom_runtime; print(agentloom_runtime.__file__)"
+```
+
+Confirm that path is the checkout you are editing. A stale `pip install -e`
+pointing at a second clone imports the wrong tree, and every symptom of it
+looks like a missing feature.
 
 ## Python API
 
@@ -127,6 +162,10 @@ export AGENTLOOM_AGENT_ID=my-builder
 
 agentloom-session resume                                    # what was I doing here?
 agentloom-session checkpoint --next "Apply migration to dev" --plan docs/plan/x.md
+
+# Fork session into a new branch across machines
+agentloom-session open --fork-from <session_id> --reason host_switch
+agentloom-session tree                                      # view ASCII DAG tree
 ```
 
 Checkpoints are deliberately terse — they load on every resume. When you need
@@ -138,6 +177,22 @@ agentloom-session index --all        # locate later: prose windows + optional em
 agentloom-session search "password policy"
 agentloom-session replay --ref <id> --around 14
 ```
+
+#### Dynamic recall for agents (MCP Server)
+AI coding agents (Cursor, Cline, OpenCode, Claude Desktop) can dynamically recall past conversations on demand:
+
+```bash
+agentloom-session-mcp                # or: agentloom-session mcp
+```
+Provides tools: `session_search`, `session_get_context`, `session_get_checkpoint`, `session_get_lineage`.
+
+#### Session Web Viewer
+Launch the zero-dependency, local visual dashboard:
+
+```bash
+agentloom-session ui                 # opens http://127.0.0.1:8766
+```
+Visualizes session DAG trees, interactive turn-by-turn conversation replays, collapsible tool calls, and instant search.
 
 The locator indexes human and agent prose only (tool-call noise is dropped), at
 two granularities, and ranks with hybrid lexical + vector search. It returns

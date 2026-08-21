@@ -15,6 +15,7 @@ def test_core_migration_files_exist():
         MIGRATIONS / "004_session_memory.sql",
         MIGRATIONS / "005_session_transcripts.sql",
         MIGRATIONS / "006_session_transcript_index.sql",
+        MIGRATIONS / "007_session_lineage.sql",
     ]
     for path in files:
         assert path.is_file(), path.name
@@ -48,3 +49,13 @@ def test_session_index_migration_points_at_transcripts():
     assert "`session_transcript_chunks`" in sql
     assert "`session_transcripts`" in sql
     assert "ON DELETE CASCADE" in sql
+
+
+def test_session_lineage_migration_adds_dag_columns():
+    sql = (MIGRATIONS / "007_session_lineage.sql").read_text(encoding="utf-8")
+    assert "`parent_session_id`" in sql
+    assert "`fork_checkpoint_id`" in sql
+    assert "`fork_reason`" in sql
+    assert "`fk_agent_sessions_parent`" in sql
+    assert "`fk_agent_sessions_fork_checkpoint`" in sql
+    assert "ON DELETE SET NULL" in sql
