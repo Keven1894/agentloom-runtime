@@ -308,6 +308,20 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compact(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    stats = store.compact_embeddings(
+        workspace_key=None if args.all_workspaces else workspace_key
+    )
+    _emit(
+        stats,
+        f"converted {stats['converted']} embedding(s) to float32, "
+        f"{stats['unreadable']} unreadable, {stats['scanned']} scanned",
+        args.json,
+    )
+    return 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     _, _, workspace_key = _identity(args)
     from agentloom_runtime.memory.embedding_provider import embed_query, get_embedding_model
@@ -559,6 +573,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-embed", action="store_true", help="lexical index only; skip embeddings")
     p.add_argument("--model", help="embedding model name (default: EMBEDDING_MODEL)")
     p.set_defaults(func=cmd_index)
+
+    p = sub.add_parser(
+        "compact", help="re-encode legacy JSON embeddings as compact float32"
+    )
+    _add_common(p)
+    p.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help="convert every workspace, not only the current one",
+    )
+    p.set_defaults(func=cmd_compact)
 
     p = sub.add_parser("search", help="find archived conversations by what was said")
     _add_common(p)

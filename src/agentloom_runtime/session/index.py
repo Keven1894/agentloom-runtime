@@ -37,11 +37,14 @@ from agentloom_runtime.session.transcript import TranscriptDocument, TranscriptT
 __all__ = [
     "MAX_CONTENT_CHARS",
     "MIN_PROSE_CHARS",
+    "VECTOR_DTYPE",
     "WINDOW_SIZE",
     "WINDOW_STRIDE",
     "ArchiveHit",
     "TranscriptChunk",
     "chunk_document",
+    "decode_vector",
+    "encode_vector",
     "hybrid_rank",
     "lexical_rank",
     "prose_turns",
@@ -53,6 +56,11 @@ WINDOW_SIZE = 5
 WINDOW_STRIDE = 3
 MAX_CONTENT_CHARS = 6000
 MIN_PROSE_CHARS = 40
+
+# Little-endian float32. Pinned rather than native because these vectors are
+# written and read across architectures — the same archive is used from x86-64
+# and aarch64 — and a native-order round trip would corrupt silently.
+VECTOR_DTYPE = "<f4"
 
 _TOKEN = re.compile(r"[A-Za-z0-9_./:@-]+|[\u4e00-\u9fff]+")
 _ROLE_LABEL = {"human": "Human", "agent": "Agent", "system": "System"}
@@ -216,6 +224,36 @@ def lexical_rank(query: str, items: list[tuple[str, str]]) -> list[tuple[str, fl
     return ranked
 
 
+def encode_vector(vec: Optional[list[float]]) -> Optional[bytes]:
+    """Pack an embedding for storage. ``None`` and empty stay ``None``."""
+    if not vec:
+        return None
+    return _np().asarray(vec, dtype=VECTOR_DTYPE).tobytes()
+
+
+def decode_vector(blob: Optional[bytes], dim: Optional[int] = None) -> Optional[list[float]]:
+    """Unpack a stored embedding.
+
+    A truncated or wrong-width buffer returns ``None`` rather than a plausible
+    vector of the wrong length: a silently mis-decoded embedding would rank
+    results confidently and wrongly, which is harder to notice than a miss.
+    """
+    if not blob:
+        return None
+    if len(blob) % 4:
+        return None
+    values = _np().frombuffer(blob, dtype=VECTOR_DTYPE)
+    if dim is not None and len(values) != dim:
+        return None
+    return values.tolist()
+
+
+def _np():
+    import numpy
+
+    return numpy
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -231,7 +269,35 @@ def vector_rank(
     query_vec: list[float],
     items: list[tuple[str, list[float]]],
 ) -> list[tuple[str, float]]:
-    ranked = [(key, _cosine(query_vec, vec)) for key, vec in items if vec]
+    """Cosine similarity of every candidate against the query.
+
+    Scored as one matrix operation. Vectors of an unexpected width are dropped
+    rather than reshaped — a mismatch means a different embedding model, and
+    comparing across models produces numbers that look like similarities.
+    """
+    usable = [(key, vec) for key, vec in items if vec]
+    if not usable or not query_vec:
+        return []
+
+    numpy = _np()
+    width = len(query_vec)
+    usable = [(key, vec) for key, vec in usable if len(vec) == width]
+    if not usable:
+        return []
+
+    matrix = numpy.asarray([vec for _, vec in usable], dtype=VECTOR_DTYPE)
+    query = numpy.asarray(query_vec, dtype=VECTOR_DTYPE)
+
+    norms = numpy.linalg.norm(matrix, axis=1)
+    query_norm = numpy.linalg.norm(query)
+    if query_norm == 0:
+        return []
+    # Zero-norm rows would divide by zero; they score 0 by definition.
+    safe = numpy.where(norms == 0, 1.0, norms)
+    scores = (matrix @ query) / (safe * query_norm)
+    scores = numpy.where(norms == 0, 0.0, scores)
+
+    ranked = list(zip((key for key, _ in usable), (float(s) for s in scores)))
     ranked.sort(key=lambda item: item[1], reverse=True)
     return ranked
 

@@ -16,6 +16,7 @@ def test_core_migration_files_exist():
         MIGRATIONS / "005_session_transcripts.sql",
         MIGRATIONS / "006_session_transcript_index.sql",
         MIGRATIONS / "007_session_lineage.sql",
+        MIGRATIONS / "008_session_transcript_vectors.sql",
     ]
     for path in files:
         assert path.is_file(), path.name
@@ -59,3 +60,17 @@ def test_session_lineage_migration_adds_dag_columns():
     assert "`fk_agent_sessions_parent`" in sql
     assert "`fk_agent_sessions_fork_checkpoint`" in sql
     assert "ON DELETE SET NULL" in sql
+
+
+def test_vector_migration_adds_compact_columns_without_dropping_the_old_one():
+    """008 must be additive.
+
+    A reader that has not been upgraded still reads the JSON column, so the
+    migration can be applied before the code that supersedes it. Dropping the
+    old column belongs to a later migration, after the backfill is verified.
+    """
+    sql = (MIGRATIONS / "008_session_transcript_vectors.sql").read_text(encoding="utf-8")
+    assert "`embedding_f32`" in sql
+    assert "`embedding_dim`" in sql
+    assert "MEDIUMBLOB" in sql
+    assert "DROP COLUMN" not in sql.upper()

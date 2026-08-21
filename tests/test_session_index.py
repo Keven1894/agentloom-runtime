@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import struct
+
+import pytest
+
 from agentloom_runtime.session.index import (
     chunk_document,
+    decode_vector,
+    encode_vector,
     hybrid_rank,
     lexical_rank,
     prose_turns,
@@ -124,3 +130,69 @@ def test_hybrid_rank_returns_one_window_pointer_per_transcript():
     assert len(t1) == 1
     assert t1[0]["granularity"] == "window"
     assert t1[0]["seq_start"] == 12
+
+
+# --------------------------------------------------------------------------
+# vector storage — the archive is written and read across architectures
+# --------------------------------------------------------------------------
+
+
+def test_vector_survives_an_encode_decode_round_trip():
+    vec = [0.5, -0.25, 0.125, 0.0]
+    restored = decode_vector(encode_vector(vec), dim=len(vec))
+    assert restored == pytest.approx(vec)
+
+
+def test_encoding_is_little_endian_float32_regardless_of_host():
+    """Byte order is pinned, not native.
+
+    The same rows are written from x86-64 and read from aarch64. A native-order
+    encoding would round-trip perfectly on one machine and return garbage
+    similarities on the other.
+    """
+    blob = encode_vector([1.0])
+    assert blob == struct.pack("<f", 1.0)
+    assert len(encode_vector([0.0] * 1536)) == 1536 * 4
+
+
+def test_empty_and_missing_vectors_decode_to_none():
+    assert encode_vector(None) is None
+    assert encode_vector([]) is None
+    assert decode_vector(None) is None
+    assert decode_vector(b"") is None
+
+
+def test_a_corrupt_buffer_decodes_to_none_rather_than_a_plausible_vector():
+    """A truncated buffer must not become a shorter vector.
+
+    Silently returning the wrong width would rank confidently against the wrong
+    dimensions instead of reporting that the row is unusable.
+    """
+    assert decode_vector(b"\x00\x00\x00") is None  # not a whole number of floats
+    assert decode_vector(encode_vector([1.0, 2.0]), dim=1536) is None
+
+
+def test_vector_rank_orders_by_cosine_similarity():
+    query = [1.0, 0.0]
+    ranked = vector_rank(query, [("opposite", [-1.0, 0.0]),
+                                 ("same", [1.0, 0.0]),
+                                 ("orthogonal", [0.0, 1.0])])
+    assert [key for key, _ in ranked] == ["same", "orthogonal", "opposite"]
+    assert ranked[0][1] == pytest.approx(1.0)
+    assert ranked[1][1] == pytest.approx(0.0)
+
+
+def test_vector_rank_ignores_vectors_of_a_different_width():
+    """A width mismatch means a different embedding model.
+
+    Comparing across models yields numbers that look like similarities, so the
+    rows are dropped instead.
+    """
+    ranked = vector_rank([1.0, 0.0], [("ok", [1.0, 0.0]), ("other-model", [1.0, 0.0, 0.0])])
+    assert [key for key, _ in ranked] == ["ok"]
+
+
+def test_vector_rank_tolerates_a_zero_vector():
+    ranked = dict(vector_rank([1.0, 0.0], [("zero", [0.0, 0.0]), ("same", [1.0, 0.0])]))
+    assert ranked["zero"] == 0.0
+    assert ranked["same"] == pytest.approx(1.0)

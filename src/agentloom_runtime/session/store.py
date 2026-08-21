@@ -12,6 +12,7 @@ import json
 import uuid
 import zlib
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from typing import Any, Optional
 
 from agentloom_runtime.db import connect
@@ -19,6 +20,8 @@ from agentloom_runtime.session.identity import HostContext
 from agentloom_runtime.session.index import (
     ArchiveHit,
     chunk_document,
+    decode_vector,
+    encode_vector,
     hybrid_rank,
     snippet as make_snippet,
 )
@@ -35,6 +38,7 @@ __all__ = [
     "get_session_lineage",
     "get_workspace_session_tree",
     "index_transcript",
+    "compact_embeddings",
     "index_workspace",
     "list_checkpoints",
     "list_transcripts",
@@ -764,6 +768,62 @@ def _parse_embedding(value: Any) -> Optional[list[float]]:
     return None
 
 
+@lru_cache(maxsize=None)
+def _has_legacy_embedding_column() -> bool:
+    """Whether the pre-009 JSON embedding column is still present.
+
+    Cached: the answer only changes when a migration runs, which does not happen
+    inside a live process, and the alternative is an information_schema lookup
+    on the read path of every search.
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "  AND table_name = 'session_transcript_chunks' "
+            "  AND column_name = 'embedding'"
+        ).fetchone()
+        return bool(row and int(row["n"]))
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _fill_legacy_embeddings(items: list[dict[str, Any]]) -> None:
+    """Supply vectors for rows that predate the compact format.
+
+    Dropping such rows would quietly shrink the vector half of the ranking
+    while still reporting a hybrid search, so they are fetched — but only the
+    rows that need it, and only while the legacy column still exists. After
+    migration 009 the column is gone and this is a no-op.
+
+    Run ``agentloom-session compact`` to make this path unnecessary.
+    """
+    if not _has_legacy_embedding_column():
+        return
+    missing = [item["id"] for item in items if not item.get("embedding")]
+    if not missing:
+        return
+
+    placeholders = ",".join("?" * len(missing))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"SELECT chunk_id, embedding FROM session_transcript_chunks "
+            f"WHERE chunk_id IN ({placeholders})",
+            missing,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    legacy = {row["chunk_id"]: _parse_embedding(row["embedding"]) for row in rows}
+    for item in items:
+        if not item.get("embedding"):
+            item["embedding"] = legacy.get(item["id"])
+
+
 def _load_transcript_row(
     transcript_id: Optional[str] = None,
     source_ref: Optional[str] = None,
@@ -817,8 +877,12 @@ def index_transcript(
 
     conn = connect()
     try:
+        # Test for a vector's presence rather than selecting it: re-indexing
+        # only needs to know whether one exists, and pulling the column here
+        # would move the whole archive's embeddings for a no-op run.
         existing_rows = conn.execute(
-            "SELECT chunk_id, granularity, seq_start, seq_end, content_sha256, embedding "
+            "SELECT chunk_id, granularity, seq_start, seq_end, content_sha256, "
+            "       (embedding_f32 IS NOT NULL) AS has_vector "
             "FROM session_transcript_chunks "
             "WHERE transcript_id = ? AND embedding_model = ?",
             [transcript_id, model],
@@ -843,7 +907,7 @@ def index_transcript(
             key = (chunk.granularity, chunk.seq_start, chunk.seq_end)
             prev = existing.get(key)
             if prev and prev["content_sha256"] == chunk.content_sha256:
-                has_vec = prev["embedding"] is not None
+                has_vec = bool(prev["has_vector"])
                 if has_vec or embed_fn is None:
                     unchanged += 1
                     continue
@@ -856,8 +920,9 @@ def index_transcript(
                 INSERT INTO session_transcript_chunks
                     (chunk_id, transcript_id, workspace_key, source_host, source_ref,
                      granularity, seq_start, seq_end, captured_at, content,
-                     content_sha256, embedding, embedding_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                     content_sha256, embedding_f32, embedding_dim,
+                     embedding_model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 ON DUPLICATE KEY UPDATE
                     workspace_key = VALUES(workspace_key),
                     source_host = VALUES(source_host),
@@ -865,7 +930,8 @@ def index_transcript(
                     captured_at = VALUES(captured_at),
                     content = VALUES(content),
                     content_sha256 = VALUES(content_sha256),
-                    embedding = NULL
+                    embedding_f32 = NULL,
+                    embedding_dim = NULL
                 """,
                 [
                     chunk_id,
@@ -893,8 +959,9 @@ def index_transcript(
                 )
             for (chunk_id, _), vector in zip(to_embed, vectors):
                 conn.execute(
-                    "UPDATE session_transcript_chunks SET embedding = ? WHERE chunk_id = ?",
-                    [json.dumps(vector), chunk_id],
+                    "UPDATE session_transcript_chunks "
+                    "SET embedding_f32 = ?, embedding_dim = ? WHERE chunk_id = ?",
+                    [encode_vector(vector), len(vector) if vector else None, chunk_id],
                 )
                 embedded += 1
 
@@ -910,6 +977,62 @@ def index_transcript(
         raise
     finally:
         conn.close()
+
+
+def compact_embeddings(
+    *,
+    workspace_key: Optional[str] = None,
+    batch_size: int = 200,
+) -> dict[str, int]:
+    """Convert legacy JSON embeddings to the compact float32 column.
+
+    A pure re-encoding: the vectors are identical, so this costs no embedding
+    API calls and can run repeatedly. Rows are processed in batches because the
+    JSON column is the very thing that makes a full scan expensive.
+
+    Once migration 009 has dropped the JSON column there is nothing left to
+    convert, and this reports zero rather than failing — the command stays safe
+    to leave in a scheduled job.
+    """
+    stats = {"scanned": 0, "converted": 0, "unreadable": 0}
+    if not _has_legacy_embedding_column():
+        return stats
+
+    where = "embedding IS NOT NULL AND embedding_f32 IS NULL"
+    params: list[Any] = []
+    if workspace_key:
+        where += " AND workspace_key = ?"
+        params.append(workspace_key)
+
+    conn = connect()
+    try:
+        while True:
+            rows = conn.execute(
+                f"SELECT chunk_id, embedding FROM session_transcript_chunks "
+                f"WHERE {where} LIMIT {int(batch_size)}",
+                params,
+            ).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                stats["scanned"] += 1
+                vector = _parse_embedding(row["embedding"])
+                if not vector:
+                    # Leave it for inspection rather than silently blanking a row.
+                    stats["unreadable"] += 1
+                    continue
+                conn.execute(
+                    "UPDATE session_transcript_chunks "
+                    "SET embedding_f32 = ?, embedding_dim = ? WHERE chunk_id = ?",
+                    [encode_vector(vector), len(vector), row["chunk_id"]],
+                )
+                stats["converted"] += 1
+            conn.commit()
+            if stats["unreadable"] and stats["converted"] == 0:
+                break  # nothing convertible left; avoid looping on bad rows
+    finally:
+        conn.close()
+    return stats
 
 
 def index_workspace(
@@ -957,12 +1080,21 @@ def search_archive(
         params.append(model)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
+    # Only pay for vectors when something will rank with them. Selecting the
+    # embedding column unconditionally made a lexical-only query transfer and
+    # parse every vector in the workspace: measured at 12.8 s of a 13 s search,
+    # against 115 ms of actual ranking.
+    #
+    # This never names the legacy JSON column, so it keeps working after 009
+    # drops it. Rows predating the compact format are filled in afterwards.
+    vector_columns = ", embedding_f32, embedding_dim" if query_vec else ""
+
     conn = connect()
     try:
         rows = conn.execute(
             f"""
             SELECT chunk_id, transcript_id, workspace_key, source_host, source_ref,
-                   granularity, seq_start, seq_end, captured_at, content, embedding
+                   granularity, seq_start, seq_end, captured_at, content{vector_columns}
             FROM session_transcript_chunks
             {where}
             """,
@@ -973,21 +1105,27 @@ def search_archive(
 
     items: list[dict[str, Any]] = []
     for row in rows:
-        items.append(
-            {
-                "id": row["chunk_id"],
-                "transcript_id": row["transcript_id"],
-                "workspace_key": row["workspace_key"],
-                "source_host": row["source_host"],
-                "source_ref": row["source_ref"],
-                "granularity": row["granularity"],
-                "seq_start": int(row["seq_start"]),
-                "seq_end": int(row["seq_end"]),
-                "captured_at": _iso(row["captured_at"]),
-                "content": row["content"] or "",
-                "embedding": _parse_embedding(row["embedding"]),
-            }
-        )
+        item = {
+            "id": row["chunk_id"],
+            "transcript_id": row["transcript_id"],
+            "workspace_key": row["workspace_key"],
+            "source_host": row["source_host"],
+            "source_ref": row["source_ref"],
+            "granularity": row["granularity"],
+            "seq_start": int(row["seq_start"]),
+            "seq_end": int(row["seq_end"]),
+            "captured_at": _iso(row["captured_at"]),
+            "content": row["content"] or "",
+        }
+        if query_vec:
+            item["embedding"] = decode_vector(
+                row["embedding_f32"],
+                int(row["embedding_dim"]) if row["embedding_dim"] else None,
+            )
+        items.append(item)
+
+    if query_vec:
+        _fill_legacy_embeddings(items)
 
     ranked = hybrid_rank(query, items, query_vec=query_vec, limit=limit)
     hits: list[ArchiveHit] = []

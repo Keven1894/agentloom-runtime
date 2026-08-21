@@ -45,13 +45,23 @@ mysql ... < migrations/mysql/004_session_memory.sql
 mysql ... < migrations/mysql/005_session_transcripts.sql
 mysql ... < migrations/mysql/006_session_transcript_index.sql
 mysql ... < migrations/mysql/007_session_lineage.sql
+mysql ... < migrations/mysql/008_session_transcript_vectors.sql
+mysql ... < migrations/mysql/009_drop_json_embeddings.sql
 ```
 
 `004_session_memory.sql` is standalone: apply it on its own if you only want
 Layer 0 session continuity. `005_session_transcripts.sql` adds the conversation
 archive (requires 004). `006_session_transcript_index.sql` adds the archive
 locator (requires 005). `007_session_lineage.sql` adds session DAG topology
-(requires 004).
+(requires 004). `008_session_transcript_vectors.sql` adds compact float32
+embedding storage (requires 006).
+
+`009_drop_json_embeddings.sql` removes the superseded JSON embedding column.
+**Upgrading an existing archive**: apply 008, run `agentloom-session compact`
+until it reports zero conversions, then apply 009 and `OPTIMIZE TABLE
+session_transcript_chunks` — `DROP COLUMN` leaves the freed pages inside the
+tablespace. On a fresh install there is nothing to compact and the two can be
+applied together.
 
 Configure connection:
 
@@ -177,6 +187,12 @@ agentloom-session index --all        # locate later: prose windows + optional em
 agentloom-session search "password policy"
 agentloom-session replay --ref <id> --around 14
 ```
+
+Capture reads the local editor's transcript store, so it has to run on each
+machine that talks to an agent — no server-side process can do it for you.
+Schedule `archive --all && index --all` on every such host; both are idempotent
+and store by content hash, so re-running costs a scan rather than duplicate
+rows.
 
 #### Dynamic recall for agents (MCP Server)
 AI coding agents (Cursor, Cline, OpenCode, Claude Desktop) can dynamically recall past conversations on demand:

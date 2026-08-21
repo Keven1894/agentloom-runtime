@@ -88,6 +88,18 @@
   - Visualizes session DAG trees, interactive conversation transcripts with collapsible
     tool cards, instant hybrid search, and one-click "Continue in IDE" fork commands.
 
+- **Compact vector storage for the archive index** — embeddings move from JSON
+  text to little-endian float32 blobs.
+  - `migrations/mysql/008_session_transcript_vectors.sql` adds `embedding_f32`
+    (MEDIUMBLOB) and `embedding_dim`, alongside the JSON column so readers can
+    be upgraded independently. `009_drop_json_embeddings.sql` retires the JSON
+    column once every row carries a compact vector.
+  - `agentloom-session compact` re-encodes existing rows. It costs no embedding
+    API calls — the vectors are identical — and is a no-op after 009, so it is
+    safe to leave in a scheduled job.
+  - Byte order is pinned explicitly because these rows are written and read
+    across architectures; the same archive is served to x86-64 and aarch64.
+
 - **`agentloom_runtime.config`** — one environment loader for the whole package.
   A `.env` file fills gaps only; a variable already in the process environment
   always wins, so injected configuration beats a file on disk. Discovery walks
@@ -110,6 +122,17 @@
 - The session web viewer ignored `limit` on `/api/transcripts` and `/api/search`
   and never computed a query vector, so the human-facing surface was capped at
   hardcoded page sizes and searched lexically against an embedded archive.
+- `search_archive` selected the embedding column on every query, including
+  lexical-only ones that never looked at a vector. On a 10,121-chunk archive
+  that moved 299 MB to rank against 27 MB of content: 16.4 s for a lexical
+  search whose ranking took 115 ms. Vectors are now fetched only when something
+  will rank with them, and re-indexing tests for a vector's presence instead of
+  selecting it to check for NULL. Lexical search 16.4 s → 0.6 s; hybrid search
+  12 s → 1.7 s excluding the embedding API call.
+- `HybridRow` iterated column *names* rather than values, so the most ordinary
+  line in database code — `for schema, table in cursor.fetchall():` — bound the
+  wrong data with no exception raised. It now matches `sqlite3.Row` and the
+  DB-API. Key-based membership (`"col" in row`) is unchanged.
 
 ### Changed
 

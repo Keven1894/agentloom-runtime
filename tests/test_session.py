@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from agentloom_runtime.session import store
 from agentloom_runtime.session.identity import HostContext, normalize_workspace_key
 from agentloom_runtime.session.store import ResumePack, SessionRecord, render_resume_pack
 from agentloom_runtime.session.vcs import _summarize_status
@@ -117,6 +119,83 @@ def test_session_layer_carries_no_deployment_identity():
     for name, source in _sources().items():
         match = forbidden.search(source)
         assert not match, f"{name} leaks deployment-specific identity: {match.group(0)!r}"
+
+
+def test_lexical_search_never_selects_the_embedding_column():
+    """The single change that took search from 16 s to under a second.
+
+    ``search_archive`` selected the embedding column unconditionally, so a
+    lexical-only query transferred and parsed every vector in the workspace:
+    measured at 12.8 s of a 13 s search, against 115 ms of actual ranking.
+    Nothing about the result changed, which is why it went unnoticed.
+    """
+    captured: list[str] = []
+
+    class _Conn:
+        def execute(self, sql, params=None):
+            captured.append(sql)
+            return self
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    with patch("agentloom_runtime.session.store.connect", return_value=_Conn()):
+        store.search_archive("anything", workspace_key="github.com/acme/repo")
+    assert captured, "expected a query to be issued"
+    assert "embedding" not in captured[0], (
+        "lexical-only search must not pay for vectors it will not rank with"
+    )
+
+    captured.clear()
+    with patch("agentloom_runtime.session.store.connect", return_value=_Conn()):
+        store.search_archive(
+            "anything", workspace_key="github.com/acme/repo", query_vec=[0.1, 0.2]
+        )
+    assert "embedding_f32" in captured[0], "vector search must request the vectors"
+
+
+def test_reindex_tests_for_a_vector_rather_than_selecting_it():
+    """Re-indexing only needs to know whether a vector exists.
+
+    Selecting the column to check it for NULL would move the whole archive's
+    embeddings on a run that changes nothing.
+    """
+    source = (SESSION_PKG / "store.py").read_text(encoding="utf-8")
+    reindex_query = re.search(
+        r"SELECT chunk_id, granularity.*?FROM session_transcript_chunks",
+        source,
+        re.DOTALL,
+    )
+    assert reindex_query, "could not locate the re-index lookup"
+    selected = reindex_query.group(0)
+    assert "IS NOT NULL) AS has_vector" in selected, "must test for a vector"
+    assert not re.search(r"\bembedding(_f32)?\s*,", selected), (
+        "re-index must not select an embedding column, only test for one"
+    )
+
+
+def test_write_paths_do_not_name_the_column_009_dropped():
+    """Only reads may mention the legacy JSON embedding column, and only guarded.
+
+    Migration 009 drops ``embedding``. A write that still names it fails against
+    a migrated database, and it would fail at index time — long after the change
+    that introduced it looked fine.
+    """
+    source = (SESSION_PKG / "store.py").read_text(encoding="utf-8")
+    for statement in re.findall(r"(?:INSERT INTO|UPDATE)\s+session_transcript_chunks.*?\"\"\"",
+                                source, re.DOTALL):
+        assert not re.search(r"\bembedding\b\s*(?:,|=)", statement), (
+            "a write statement still names the dropped `embedding` column:\n"
+            + statement[:300]
+        )
+
+    # The one read that may touch it must first check that it exists.
+    legacy_reader = source[source.index("def _fill_legacy_embeddings"):]
+    legacy_reader = legacy_reader[: legacy_reader.index("\ndef ", 1)]
+    assert "_has_legacy_embedding_column()" in legacy_reader
 
 
 def test_schema_keeps_hint_columns_out_of_lookup_indexes():
