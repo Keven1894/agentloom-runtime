@@ -29,6 +29,12 @@ acme/b.git
 `C:\projects\widget` on Windows and `/home/dev/widget` on Linux
 ``C:\\projects\\widget`` becomes ``c-projects-widget``
 workspace_slug(Path("C:/projects/widget"))
+# Same illustration in memory-reconstruction.md, including inside Mermaid nodes.
+# The whole point of these lines is that the two paths differ per platform, so
+# the contrast cannot be written without showing a Windows-shaped path.
+`C:\projects\x` and `/home/dev/x` is already two different keys before anything
+A["<b>Machine A</b><br/>C:\projects\widget<br/>Windows · editor X · laptop-1"]
+checkout at `C:\projects\widget` and one at `~/scratch/wk` are recognized
 
 # --- Transcript redaction test fixtures ---------------------------------------
 # Synthetic credential-shaped strings that exist *because* the tests assert they

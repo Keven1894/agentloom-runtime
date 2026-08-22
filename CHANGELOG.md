@@ -152,6 +152,16 @@
   marks only the last unsupported; adds the checkpoint-vs-archive split, the
   redaction contract, and the amended H5 invariant.
 
+- `docs/memory/memory-reconstruction.md` — the mechanism behind Layer 0, in five
+  Mermaid diagrams: why migrating an editor's private store is the wrong shape
+  (N×M adapters against path-hashed stores that reject external writers) and
+  deriving identity is the right one; how a VCS remote becomes a session key and
+  which fields are deliberately excluded from it; the cross-machine lifecycle
+  including the fork that makes the history a DAG; and the three-tier retrieval
+  ladder that separates checkpoint, locator, and archive by cost rather than by
+  subject. Diagrams are inline Mermaid, so the repository still carries no
+  binary assets.
+
 ## 0.1.0 — 2026-06-11
 
 First installable library release. Extracted from the Envita production runtime and

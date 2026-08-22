@@ -241,8 +241,10 @@ agentloom-hostrules check    # fail if any drifted (CI / pre-commit)
 A target is a path plus optional front matter, so supporting a new IDE is a
 manifest entry rather than a code change.
 
-Design, host-neutrality invariants, and the host adapter conformance checklist:
-[`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md).
+How this works and why it is shaped this way, in five diagrams:
+[`docs/memory/memory-reconstruction.md`](docs/memory/memory-reconstruction.md).
+Host-neutrality invariants, data model, and the host adapter conformance
+checklist: [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md).
 
 ### FAIR compliance
 
@@ -295,6 +297,7 @@ retrieval pipeline that serves them.
 |-----|----------------|
 | [`docs/memory/three-layer-memory-architecture.md`](docs/memory/three-layer-memory-architecture.md) | The layered memory model: curated knowledge, management state, and plan/provenance — with a retrieval router and freshness rules. |
 | [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md) | Cross-host working-session continuity: checkpoints vs. the transcript archive, why not to write the editor's chat database, the host-neutrality invariants, and the host adapter contract. |
+| [`docs/memory/memory-reconstruction.md`](docs/memory/memory-reconstruction.md) | **Start here for Layer 0.** The mechanism behind cross-machine continuity, in five diagrams: why identity is derived rather than transferred, how the VCS remote becomes a session key, what happens across two machines, and the three-tier retrieval cost ladder. |
 | [`docs/memory/adr-001-kg-as-engine.md`](docs/memory/adr-001-kg-as-engine.md) | Architecture decision: the knowledge graph is the runtime *engine* via one graph-first pipeline, not a documentation-only artifact. |
 | [`docs/memory/kg-sync-and-maintenance.md`](docs/memory/kg-sync-and-maintenance.md) | The one-way file → database sync contract that keeps authored knowledge and runtime behavior in agreement. |
 | [`docs/agents/operational-agent-productization-playbook.md`](docs/agents/operational-agent-productization-playbook.md) | An 8-step process for turning a manual workflow into a governed, token-protected, dispatchable MCP agent. |

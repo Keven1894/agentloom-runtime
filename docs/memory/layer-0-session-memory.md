@@ -258,5 +258,6 @@ encode. Tool-call noise is not embedded.
 
 ## Related
 
+- [`memory-reconstruction.md`](memory-reconstruction.md) — the mechanism behind this contract, in diagrams: reconstruction vs. migration, identity derivation, the cross-machine lifecycle, and the retrieval cost ladder.
 - [`three-layer-memory-architecture.md`](three-layer-memory-architecture.md) — layers 1–3 and the retrieval router.
 - [`kg-sync-and-maintenance.md`](kg-sync-and-maintenance.md) — the file → database sync contract.
