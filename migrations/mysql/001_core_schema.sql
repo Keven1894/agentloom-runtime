@@ -26,9 +26,9 @@ CREATE TABLE IF NOT EXISTS `users` (
   `title` VARCHAR(512),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_users_username` ON `users` (`username`);
-CREATE INDEX IF NOT EXISTS `idx_users_email` ON `users` (`email`);
-CREATE INDEX IF NOT EXISTS `idx_users_status` ON `users` (`status`);
+CREATE INDEX `idx_users_username` ON `users` (`username`);
+CREATE INDEX `idx_users_email` ON `users` (`email`);
+CREATE INDEX `idx_users_status` ON `users` (`status`);
 
 CREATE TABLE IF NOT EXISTS `roles` (
   `id` VARCHAR(191),
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS `user_roles` (
   `metadata` JSON,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_user_roles_user` ON `user_roles` (`user_id`);
-CREATE INDEX IF NOT EXISTS `idx_user_roles_role` ON `user_roles` (`role_id`);
+CREATE INDEX `idx_user_roles_user` ON `user_roles` (`user_id`);
+CREATE INDEX `idx_user_roles_role` ON `user_roles` (`role_id`);
 
 CREATE TABLE IF NOT EXISTS `teams` (
   `id` VARCHAR(191),
@@ -76,8 +76,8 @@ CREATE TABLE IF NOT EXISTS `team_members` (
   `left_at` DATETIME NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_team_members_team` ON `team_members` (`team_id`);
-CREATE INDEX IF NOT EXISTS `idx_team_members_user` ON `team_members` (`user_id`);
+CREATE INDEX `idx_team_members_team` ON `team_members` (`team_id`);
+CREATE INDEX `idx_team_members_user` ON `team_members` (`user_id`);
 
 CREATE TABLE IF NOT EXISTS `projects` (
   `id` VARCHAR(191),
@@ -101,8 +101,8 @@ CREATE TABLE IF NOT EXISTS `projects` (
   `team_id` VARCHAR(191),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_projects_status` ON `projects` (`status`);
-CREATE INDEX IF NOT EXISTS `idx_projects_team` ON `projects` (`team_id`);
+CREATE INDEX `idx_projects_status` ON `projects` (`status`);
+CREATE INDEX `idx_projects_team` ON `projects` (`team_id`);
 
 CREATE TABLE IF NOT EXISTS `tasks` (
   `id` VARCHAR(191),
@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS `message_replies` (
   `draft` TINYINT(1) DEFAULT 0,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_message_replies_message` ON `message_replies` (`message_id`);
+CREATE INDEX `idx_message_replies_message` ON `message_replies` (`message_id`);
 
 CREATE TABLE IF NOT EXISTS `knowledge_embeddings` (
   `id` VARCHAR(191),
@@ -218,8 +218,8 @@ CREATE TABLE IF NOT EXISTS `knowledge_embeddings` (
   `updated_at` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-CREATE INDEX IF NOT EXISTS `idx_ke_source` ON `knowledge_embeddings` (`source_file`);
-CREATE INDEX IF NOT EXISTS `idx_ke_topic` ON `knowledge_embeddings` (`topic`(191));
-CREATE INDEX IF NOT EXISTS `idx_knowledge_embeddings_node_type` ON `knowledge_embeddings` (`node_type`);
+CREATE INDEX `idx_ke_source` ON `knowledge_embeddings` (`source_file`);
+CREATE INDEX `idx_ke_topic` ON `knowledge_embeddings` (`topic`(191));
+CREATE INDEX `idx_knowledge_embeddings_node_type` ON `knowledge_embeddings` (`node_type`);
 
 SET FOREIGN_KEY_CHECKS=1;

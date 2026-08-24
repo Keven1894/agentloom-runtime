@@ -67,6 +67,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="flex items-center space-x-2 text-xs">
+        <button v-if="selectedSession" @click="showSessionPanel = !showSessionPanel" class="px-2.5 py-1.5 rounded-lg border text-slate-300 transition flex items-center gap-1.5" :class="showSessionPanel ? 'bg-indigo-950/80 border-indigo-800/80 text-indigo-300' : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-700'">
+          <i class="fa-solid fa-cube"></i> Details
+        </button>
         <button @click="refreshAll" :disabled="loading" class="px-2.5 py-1.5 rounded-lg bg-slate-700/60 hover:bg-slate-700 text-slate-300 transition flex items-center gap-1.5">
           <i class="fa-solid fa-arrows-rotate" :class="{'fa-spin': loading}"></i> Refresh
         </button>
@@ -76,35 +79,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Main Workspace Area (3-Column Layout) -->
     <div class="flex-1 flex overflow-hidden">
       <!-- Left Column: Session DAG Tree & Transcripts -->
-      <aside class="w-80 bg-slate-900/80 border-r border-slate-800 flex flex-col shrink-0">
+      <aside class="w-80 min-w-[280px] max-w-[340px] bg-slate-900/80 border-r border-slate-800 flex flex-col shrink-0">
         <!-- Tab selector -->
-        <div class="flex border-b border-slate-800 text-xs font-medium">
+        <div class="flex border-b border-slate-800 text-xs font-medium shrink-0">
           <button @click="leftTab = 'tree'" :class="{'text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/40': leftTab === 'tree', 'text-slate-400 hover:text-slate-200': leftTab !== 'tree'}" class="flex-1 py-2.5 text-center transition flex items-center justify-center gap-1.5">
             <i class="fa-solid fa-sitemap"></i> Session DAG
           </button>
           <button @click="leftTab = 'transcripts'" :class="{'text-indigo-400 border-b-2 border-indigo-500 bg-slate-800/40': leftTab === 'transcripts', 'text-slate-400 hover:text-slate-200': leftTab !== 'transcripts'}" class="flex-1 py-2.5 text-center transition flex items-center justify-center gap-1.5">
-            <i class="fa-solid fa-comments"></i> Transcripts ({{ transcripts.length }})
+            <i class="fa-solid fa-comments"></i> Transcripts ({{ totalTranscripts }})
           </button>
         </div>
 
         <!-- Search Results View (Overrides tab if active search) -->
         <div v-if="searchResults !== null" class="flex-1 overflow-y-auto p-2 space-y-2">
           <div class="flex items-center justify-between px-2 py-1 text-xs text-slate-400">
-            <span>Search Results ({{ searchResults.length }})</span>
+            <span class="font-semibold">Search Results ({{ searchResults.length }})</span>
             <button @click="clearSearch" class="text-indigo-400 hover:underline">Clear</button>
           </div>
-          <div v-if="searchResults.length === 0" class="p-4 text-center text-xs text-slate-500">
+          <div v-if="searchResults.length === 0" class="p-6 text-center text-xs text-slate-500">
             No matching conversation snippets found.
           </div>
           <div v-for="hit in searchResults" :key="hit.chunk_id" @click="selectSearchHit(hit)" class="p-2.5 rounded-lg border border-slate-800 hover:border-indigo-500/50 bg-slate-800/30 hover:bg-slate-800/60 cursor-pointer transition text-xs space-y-1.5">
             <div class="flex items-center justify-between text-slate-400 font-mono text-[10px]">
-              <span class="truncate max-w-[140px]">Ref: {{ hit.source_ref }}</span>
+              <span class="truncate max-w-[140px]" :title="hit.source_ref">Ref: {{ hit.source_ref.slice(0, 8) }}</span>
               <span class="text-emerald-400 font-semibold">Score: {{ hit.score.toFixed(2) }}</span>
             </div>
             <div class="text-slate-300 line-clamp-3 text-[11px] leading-relaxed">
               {{ hit.snippet }}
             </div>
-            <div class="text-[10px] text-slate-500 flex items-center justify-between">
+            <div class="text-[10px] text-slate-500 flex items-center justify-between font-mono">
               <span>Turns: {{ hit.seq_start }}–{{ hit.seq_end }}</span>
               <span>{{ hit.captured_at ? hit.captured_at.slice(0, 10) : '' }}</span>
             </div>
@@ -113,7 +116,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <!-- Tree View Tab -->
         <div v-else-if="leftTab === 'tree'" class="flex-1 overflow-y-auto p-2 space-y-1">
-          <div v-if="sessionTree.length === 0" class="p-4 text-center text-xs text-slate-500">
+          <div v-if="sessionTree.length === 0" class="p-6 text-center text-xs text-slate-500">
             No session DAG nodes recorded for this workspace.
           </div>
           <div v-for="node in sessionTree" :key="node.session_id">
@@ -122,37 +125,96 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <!-- Transcripts Tab -->
-        <div v-else class="flex-1 overflow-y-auto p-2 space-y-1.5">
-          <div v-if="transcripts.length === 0" class="p-4 text-center text-xs text-slate-500">
-            No conversation transcripts archived yet.
+        <div v-else class="flex-1 flex flex-col overflow-hidden">
+          <!-- Transcripts Count & Page Size Bar -->
+          <div class="px-3 py-2 border-b border-slate-800/80 bg-slate-900/40 flex items-center justify-between text-[11px] text-slate-400 shrink-0">
+            <span class="font-medium text-slate-300">
+              <span v-if="totalTranscripts > 0">{{ transcriptPageStart }}–{{ transcriptPageEnd }} of {{ totalTranscripts }}</span>
+              <span v-else>0 conversations</span>
+            </span>
+            <div class="flex items-center gap-1.5">
+              <span class="text-[10px] text-slate-500 font-mono">Show:</span>
+              <select v-model="pageSize" @change="onPageSizeChange" class="bg-slate-800 border border-slate-700 text-[10px] rounded px-1.5 py-0.5 text-slate-300 focus:outline-none font-mono">
+                <option :value="15">15</option>
+                <option :value="30">30</option>
+                <option :value="50">50</option>
+              </select>
+            </div>
           </div>
-          <div v-for="tr in transcripts" :key="tr.transcript_id" @click="selectTranscript(tr)" :class="{'border-indigo-500 bg-slate-800/80': selectedTranscriptId === tr.transcript_id, 'border-slate-800 bg-slate-800/20 hover:bg-slate-800/50': selectedTranscriptId !== tr.transcript_id}" class="p-2.5 rounded-lg border cursor-pointer transition text-xs space-y-1">
-            <div class="flex items-center justify-between">
-              <span class="font-mono text-[11px] text-slate-200 truncate font-medium">{{ tr.source_ref.slice(0, 18) }}...</span>
-              <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-300 font-mono">{{ tr.source_host }}</span>
+
+          <!-- Transcript Cards List -->
+          <div class="flex-1 overflow-y-auto p-2 space-y-2">
+            <div v-if="transcripts.length === 0 && !loadingTranscripts" class="p-6 text-center text-xs text-slate-500">
+              No conversation transcripts archived yet.
             </div>
-            <div class="text-[11px] text-slate-400 flex items-center justify-between font-mono">
-              <span>{{ tr.turn_count }} turns</span>
-              <span v-if="tr.redaction_count > 0" class="text-amber-400"><i class="fa-solid fa-shield-halved"></i> {{ tr.redaction_count }}</span>
-              <span>{{ tr.captured_at ? tr.captured_at.slice(0, 10) : '' }}</span>
+            <div v-if="loadingTranscripts" class="p-6 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+              <i class="fa-solid fa-spinner fa-spin text-indigo-400"></i> Loading transcripts...
             </div>
+            <div v-for="tr in transcripts" :key="tr.transcript_id" @click="selectTranscript(tr)"
+              :class="{'border-indigo-500 bg-slate-800/90 shadow-md ring-1 ring-indigo-500/30': selectedTranscriptId === tr.transcript_id, 'border-slate-800/90 bg-slate-800/30 hover:bg-slate-800/60 hover:border-slate-700': selectedTranscriptId !== tr.transcript_id}"
+              class="p-2.5 rounded-lg border cursor-pointer transition text-xs space-y-1.5">
+              <!-- Top Row: Host badge & Ref / Date -->
+              <div class="flex items-center justify-between text-[10px]">
+                <div class="flex items-center gap-1.5 font-mono">
+                  <span class="px-1.5 py-0.2 rounded bg-indigo-950/90 text-indigo-300 border border-indigo-800/60 font-semibold uppercase text-[9px]">{{ tr.source_host }}</span>
+                  <span class="text-slate-400 truncate max-w-[110px]" :title="tr.source_ref">{{ tr.source_ref.slice(0, 8) }}</span>
+                </div>
+                <span class="text-slate-500 font-mono">{{ tr.captured_at ? tr.captured_at.slice(0, 10) : '' }}</span>
+              </div>
+              
+              <!-- Main Title: Conversation Name / Prompt -->
+              <div class="text-slate-200 font-medium text-[12px] leading-snug line-clamp-2" :title="tr.title || 'Untitled conversation'">
+                {{ tr.title || 'Untitled conversation' }}
+              </div>
+
+              <!-- Bottom Row: Turns & Redactions & Size -->
+              <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono pt-1 border-t border-slate-800/50">
+                <span class="flex items-center gap-1">
+                  <i class="fa-regular fa-comment-dots text-slate-500"></i> {{ tr.turn_count }} turns
+                </span>
+                <span v-if="tr.redaction_count > 0" class="text-amber-400 font-semibold flex items-center gap-1" :title="tr.redaction_count + ' redacted secrets'">
+                  <i class="fa-solid fa-shield-halved"></i> {{ tr.redaction_count }}
+                </span>
+                <span class="text-slate-500">{{ formatBytes(tr.body_bytes) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pagination Bar -->
+          <div v-if="totalPages > 1" class="p-2.5 border-t border-slate-800/80 bg-slate-900/90 flex items-center justify-between text-xs shrink-0">
+            <button @click="prevPage" :disabled="currentPage <= 1 || loadingTranscripts"
+              class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition text-[11px] flex items-center gap-1.5 font-medium">
+              <i class="fa-solid fa-chevron-left text-[10px]"></i> Prev
+            </button>
+            <span class="text-[11px] text-slate-400 font-mono">
+              Page <span class="text-slate-200 font-semibold">{{ currentPage }}</span> / {{ totalPages }}
+            </span>
+            <button @click="nextPage" :disabled="currentPage >= totalPages || loadingTranscripts"
+              class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 transition text-[11px] flex items-center gap-1.5 font-medium">
+              Next <i class="fa-solid fa-chevron-right text-[10px]"></i>
+            </button>
           </div>
         </div>
       </aside>
 
       <!-- Middle Column: Active Transcript / Conversation Viewer -->
-      <main class="flex-1 flex flex-col bg-slate-950 overflow-hidden">
-        <div v-if="activeDoc" class="border-b border-slate-800/80 px-5 py-3 bg-slate-900/40 flex items-center justify-between shrink-0">
-          <div class="flex items-center space-x-3">
-            <span class="px-2 py-0.5 text-xs font-mono rounded bg-indigo-950 text-indigo-300 border border-indigo-800/50">{{ activeDoc.source_host }}</span>
-            <span class="text-xs font-mono text-slate-300">{{ activeDoc.source_ref }}</span>
+      <main class="flex-1 min-w-0 flex flex-col bg-slate-950 overflow-hidden">
+        <div v-if="activeDoc" class="border-b border-slate-800/80 px-5 py-3 bg-slate-900/50 flex flex-col gap-1.5 shrink-0">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-2.5">
+              <span class="px-2 py-0.5 text-xs font-mono rounded bg-indigo-950 text-indigo-300 border border-indigo-800/50 font-semibold uppercase">{{ activeDoc.source_host }}</span>
+              <span class="text-xs font-mono text-slate-400 select-all" :title="activeDoc.source_ref">ref: {{ activeDoc.source_ref }}</span>
+            </div>
+            <div class="flex items-center space-x-4 text-xs text-slate-400 font-mono">
+              <span><i class="fa-solid fa-comments text-slate-500 mr-1"></i> {{ activeDoc.turns.length }} Turns</span>
+              <span v-if="activeDoc.redaction_count > 0" class="text-amber-400">
+                <i class="fa-solid fa-shield-halved mr-1"></i> {{ activeDoc.redaction_count }} Redactions
+              </span>
+            </div>
           </div>
-          <div class="flex items-center space-x-4 text-xs text-slate-400 font-mono">
-            <span><i class="fa-solid fa-comments text-slate-500 mr-1"></i> {{ activeDoc.turns.length }} Turns</span>
-            <span v-if="activeDoc.redaction_count > 0" class="text-amber-400">
-              <i class="fa-solid fa-shield-halved mr-1"></i> {{ activeDoc.redaction_count }} Redactions
-            </span>
-          </div>
+          <h2 class="text-sm font-semibold text-slate-100 truncate mt-0.5" :title="activeTranscriptTitle">
+            {{ activeTranscriptTitle || activeDoc.title || 'Conversation Transcript' }}
+          </h2>
         </div>
 
         <div v-if="activeDoc" ref="transcriptContainer" class="flex-1 overflow-y-auto p-6 space-y-6">
@@ -183,15 +245,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   <div @click="block._collapsed = !block._collapsed" class="px-3 py-2 bg-slate-800/40 flex items-center justify-between cursor-pointer hover:bg-slate-800/60 text-slate-300 text-[11px]">
                     <div class="flex items-center space-x-2 font-mono">
                       <i class="fa-solid fa-wrench text-amber-400"></i>
-                      <span class="font-semibold text-amber-300">{{ block.name }}</span>
+                      <span class="font-semibold text-amber-300">{{ block.name || block.tool_name }}</span>
                     </div>
                     <div class="flex items-center space-x-2 text-[10px] text-slate-400 font-mono">
-                      <span>{{ block.input_summary || 'tool call' }}</span>
+                      <span>{{ block.input_summary || block.tool_input || 'tool call' }}</span>
                       <i class="fa-solid" :class="block._collapsed ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
                     </div>
                   </div>
                   <div v-if="!block._collapsed" class="p-3 bg-slate-950 font-mono text-[11px] overflow-x-auto text-slate-300 border-t border-slate-800/60">
-                    <pre>{{ JSON.stringify(block.input, null, 2) }}</pre>
+                    <pre>{{ JSON.stringify(block.input || block.tool_input, null, 2) }}</pre>
                   </div>
                 </div>
               </div>
@@ -208,7 +270,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </main>
 
       <!-- Right Column: Active Session / Checkpoint Details -->
-      <aside v-if="selectedSession" class="w-84 bg-slate-900/90 border-l border-slate-800 flex flex-col overflow-y-auto shrink-0 p-4 space-y-4 text-xs">
+      <aside v-if="selectedSession && showSessionPanel" class="w-80 min-w-[260px] bg-slate-900/90 border-l border-slate-800 flex flex-col overflow-y-auto shrink-0 p-4 space-y-4 text-xs">
         <div class="flex items-center justify-between pb-3 border-b border-slate-800">
           <h2 class="font-semibold text-slate-200 flex items-center gap-1.5">
             <i class="fa-solid fa-cube text-indigo-400"></i> Session Details
@@ -270,7 +332,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <script>
-    const { createApp, ref, onMounted, nextTick } = Vue;
+    const { createApp, ref, computed, onMounted, nextTick } = Vue;
 
     const TreeNodeComponent = {
       name: 'tree-node',
@@ -302,19 +364,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       setup() {
         const workspaces = ref([]);
         const selectedWorkspace = ref('');
-        const leftTab = ref('tree');
+        const leftTab = ref('transcripts');
         const sessionTree = ref([]);
         const transcripts = ref([]);
+        const totalTranscripts = ref(0);
+        const currentPage = ref(1);
+        const pageSize = ref(15);
+        const loadingTranscripts = ref(false);
+
         const selectedSessionId = ref(null);
         const selectedSession = ref(null);
         const sessionCheckpoints = ref([]);
         const selectedTranscriptId = ref(null);
         const activeDoc = ref(null);
         const highlightedSeq = ref(null);
+        const showSessionPanel = ref(true);
         const searchQuery = ref('');
         const searchResults = ref(null);
         const loading = ref(false);
         const transcriptContainer = ref(null);
+
+        const totalPages = computed(() => Math.max(1, Math.ceil(totalTranscripts.value / pageSize.value)));
+        const transcriptPageStart = computed(() => totalTranscripts.value === 0 ? 0 : (currentPage.value - 1) * pageSize.value + 1);
+        const transcriptPageEnd = computed(() => Math.min(totalTranscripts.value, currentPage.value * pageSize.value));
+        const activeTranscriptTitle = computed(() => {
+          const tr = transcripts.value.find(t => t.transcript_id === selectedTranscriptId.value);
+          return (tr && tr.title) ? tr.title : (activeDoc.value ? (activeDoc.value.title || activeDoc.value.source_ref) : '');
+        });
+
+        const formatBytes = (bytes) => {
+          if (!bytes || bytes <= 0) return '0 B';
+          const k = 1024;
+          const sizes = ['B', 'KB', 'MB', 'GB'];
+          const i = Math.floor(Math.log(bytes) / Math.log(k));
+          return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + sizes[i];
+        };
 
         const fetchWorkspaces = async () => {
           try {
@@ -329,22 +413,48 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
         };
 
+        const fetchTranscripts = async (page = 1) => {
+          if (!selectedWorkspace.value) return;
+          loadingTranscripts.value = true;
+          currentPage.value = page;
+          const offset = (page - 1) * pageSize.value;
+          try {
+            const res = await fetch(
+              '/api/transcripts?workspace=' + encodeURIComponent(selectedWorkspace.value) +
+              '&limit=' + pageSize.value + '&offset=' + offset
+            );
+            const data = await res.json();
+            if (Array.isArray(data)) {
+              transcripts.value = data;
+              totalTranscripts.value = data.length;
+            } else {
+              transcripts.value = data.items || [];
+              totalTranscripts.value = data.total !== undefined ? data.total : (data.items || []).length;
+            }
+            if (transcripts.value.length && (!activeDoc.value || !selectedTranscriptId.value)) {
+              selectTranscript(transcripts.value[0]);
+            }
+          } catch (e) {
+            console.error('Failed to load transcripts:', e);
+          } finally {
+            loadingTranscripts.value = false;
+          }
+        };
+
         const loadWorkspaceData = async () => {
           if (!selectedWorkspace.value) return;
           loading.value = true;
           try {
-            const [treeRes, trRes] = await Promise.all([
-              fetch('/api/sessions?workspace=' + encodeURIComponent(selectedWorkspace.value)),
-              fetch('/api/transcripts?workspace=' + encodeURIComponent(selectedWorkspace.value))
-            ]);
-            sessionTree.value = await treeRes.json();
-            transcripts.value = await trRes.json();
-            if (transcripts.value.length && !activeDoc.value) {
-              selectTranscript(transcripts.value[0]);
-            }
-            if (sessionTree.value.length && !selectedSession.value) {
-              selectSession(sessionTree.value[0]);
-            }
+            const treePromise = fetch('/api/sessions?workspace=' + encodeURIComponent(selectedWorkspace.value))
+              .then(r => r.json())
+              .then(tree => {
+                sessionTree.value = tree;
+                if (sessionTree.value.length && !selectedSession.value) {
+                  selectSession(sessionTree.value[0]);
+                }
+              });
+            const trPromise = fetchTranscripts(1);
+            await Promise.all([treePromise, trPromise]);
           } catch (e) {
             console.error('Failed to load data:', e);
           } finally {
@@ -352,10 +462,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           }
         };
 
+        const nextPage = () => {
+          if (currentPage.value < totalPages.value) {
+            fetchTranscripts(currentPage.value + 1);
+          }
+        };
+
+        const prevPage = () => {
+          if (currentPage.value > 1) {
+            fetchTranscripts(currentPage.value - 1);
+          }
+        };
+
+        const onPageSizeChange = () => {
+          fetchTranscripts(1);
+        };
+
         const onWorkspaceChange = () => {
           activeDoc.value = null;
           selectedSession.value = null;
+          selectedTranscriptId.value = null;
           searchResults.value = null;
+          currentPage.value = 1;
           loadWorkspaceData();
         };
 
@@ -442,16 +570,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           leftTab,
           sessionTree,
           transcripts,
+          totalTranscripts,
+          currentPage,
+          pageSize,
+          totalPages,
+          transcriptPageStart,
+          transcriptPageEnd,
+          activeTranscriptTitle,
+          loadingTranscripts,
           selectedSessionId,
           selectedSession,
           sessionCheckpoints,
           selectedTranscriptId,
           activeDoc,
           highlightedSeq,
+          showSessionPanel,
           searchQuery,
           searchResults,
           loading,
           transcriptContainer,
+          formatBytes,
+          fetchTranscripts,
+          nextPage,
+          prevPage,
+          onPageSizeChange,
           onWorkspaceChange,
           selectSession,
           selectTranscript,
@@ -473,9 +615,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 def _int_param(
-    query: dict[str, list[str]], name: str, default: int, *, maximum: int
+    query: dict[str, list[str]],
+    name: str,
+    default: int,
+    *,
+    maximum: int,
+    minimum: int = 1,
 ) -> int:
-    """Read a positive integer from the query string.
+    """Read an integer from the query string with clamping.
 
     Clamped rather than rejected: this viewer is a local read-only tool, and a
     hand-typed URL should degrade to a sane page instead of an error. The upper
@@ -488,7 +635,7 @@ def _int_param(
         value = int(raw)
     except (TypeError, ValueError):
         return default
-    return max(1, min(value, maximum))
+    return max(minimum, min(value, maximum))
 
 
 class SessionApiHandler(http.server.BaseHTTPRequestHandler):
@@ -525,7 +672,9 @@ class SessionApiHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/transcripts":
             ws = query.get("workspace", [None])[0]
-            self._handle_transcripts(ws, _int_param(query, "limit", 50, maximum=500))
+            limit = _int_param(query, "limit", 20, maximum=500, minimum=1)
+            offset = _int_param(query, "offset", 0, maximum=100000, minimum=0)
+            self._handle_transcripts(ws, limit, offset)
             return
 
         if path.startswith("/api/transcripts/"):
@@ -537,7 +686,7 @@ class SessionApiHandler(http.server.BaseHTTPRequestHandler):
             q = query.get("q", [""])[0]
             ws = query.get("workspace", [None])[0]
             lexical = query.get("lexical", ["0"])[0] in ("1", "true", "yes")
-            self._handle_search(q, ws, _int_param(query, "limit", 12, maximum=100), lexical)
+            self._handle_search(q, ws, _int_param(query, "limit", 12, maximum=100, minimum=1), lexical)
             return
 
         self.send_response(404)
@@ -582,9 +731,24 @@ class SessionApiHandler(http.server.BaseHTTPRequestHandler):
         except Exception as exc:
             self._json({"error": str(exc)}, status=404)
 
-    def _handle_transcripts(self, workspace_key: Optional[str], limit: int = 50) -> None:
-        trs = store.list_transcripts(workspace_key=workspace_key, limit=limit)
-        self._json([t.to_dict() for t in trs])
+    def _handle_transcripts(
+        self, workspace_key: Optional[str], limit: int = 20, offset: int = 0
+    ) -> None:
+        try:
+            total = store.count_transcripts(workspace_key=workspace_key)
+        except Exception:
+            total = 0
+        trs = store.list_transcripts(
+            workspace_key=workspace_key, limit=limit, offset=offset
+        )
+        if total == 0 and trs:
+            total = len(trs)
+        self._json({
+            "items": [t.to_dict() for t in trs],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
 
     def _handle_transcript_detail(self, transcript_id: str) -> None:
         doc = store.load_transcript(transcript_id=transcript_id)
@@ -638,5 +802,6 @@ def run_server(host: str = "127.0.0.1", port: int = 8766, open_browser: bool = T
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\nShutting down session viewer.")
+            print("\nShutting down Layer 0 Session Viewer.")
+            return 0
     return 0

@@ -20,10 +20,10 @@ CREATE TABLE IF NOT EXISTS kg_nodes (
   updated_at    DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_kg_nodes_current ON kg_nodes (current_key);
-CREATE INDEX IF NOT EXISTS idx_kg_nodes_node_id ON kg_nodes (node_id);
-CREATE INDEX IF NOT EXISTS idx_kg_nodes_type ON kg_nodes (node_type);
-CREATE INDEX IF NOT EXISTS idx_kg_nodes_source_path ON kg_nodes (source_path(191));
+CREATE UNIQUE INDEX uq_kg_nodes_current ON kg_nodes (current_key);
+CREATE INDEX idx_kg_nodes_node_id ON kg_nodes (node_id);
+CREATE INDEX idx_kg_nodes_type ON kg_nodes (node_type);
+CREATE INDEX idx_kg_nodes_source_path ON kg_nodes (source_path(191));
 
 CREATE TABLE IF NOT EXISTS kg_edges (
   src_id    VARCHAR(191) NOT NULL,
@@ -33,5 +33,5 @@ CREATE TABLE IF NOT EXISTS kg_edges (
   PRIMARY KEY (src_id, dst_id, edge_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE INDEX IF NOT EXISTS idx_kg_edges_dst ON kg_edges (dst_id);
-CREATE INDEX IF NOT EXISTS idx_kg_edges_type ON kg_edges (edge_type);
+CREATE INDEX idx_kg_edges_dst ON kg_edges (dst_id);
+CREATE INDEX idx_kg_edges_type ON kg_edges (edge_type);

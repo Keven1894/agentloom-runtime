@@ -485,6 +485,180 @@ def cmd_ui(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    from agentloom_runtime.db import migrate
+
+    group = None if args.group == "all" else args.group
+
+    if args.status:
+        states = migrate.status(group)
+        print(f"migrations: {migrate.migrations_dir()}")
+        print(migrate.describe(states))
+        return 0
+
+    actions = migrate.apply_migrations(group, baseline=args.baseline)
+    applied = [name for name, action in actions if action != "skipped"]
+    skipped = [name for name, action in actions if action == "skipped"]
+
+    verb = "recorded (not executed)" if args.baseline else "applied"
+    if applied:
+        print(f"{verb}: {len(applied)}")
+        for name in applied:
+            print(f"  + {name}")
+    if skipped:
+        print(f"already applied: {len(skipped)}")
+    if not applied:
+        print("schema is up to date.")
+    return 0
+
+
+def _doctor_checks(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+    """Run every self-check. Returns ``(name, status, detail)`` triples.
+
+    Ordered so the first failure is the most upstream cause: an unreachable
+    database explains a migration check that could not run, and there is no
+    point reporting identity if nothing can be stored.
+    """
+    import os
+
+    checks: list[tuple[str, str, str]] = []
+
+    import agentloom_runtime
+
+    checks.append(("package", "ok", str(Path(agentloom_runtime.__file__).parent)))
+
+    from agentloom_runtime.config import find_env_file
+
+    env_file = find_env_file()
+    checks.append(("config", "ok" if env_file else "warn",
+                   str(env_file) if env_file else "no .env found; relying on the process environment"))
+
+    settings = None
+    try:
+        from agentloom_runtime.db import get_database_settings
+
+        settings = get_database_settings()
+        secret = "set" if getattr(settings, "password", None) else "MISSING"
+        checks.append((
+            "db config", "ok",
+            f"{settings.user}@{settings.host}:{settings.port}/{settings.database} (password: {secret})",
+        ))
+    except Exception as exc:  # noqa: BLE001 - a config error is a reportable result
+        checks.append(("db config", "fail", str(exc)))
+
+    conn = None
+    if settings is not None:
+        try:
+            from agentloom_runtime.db import connect
+
+            conn = connect()
+            conn.execute("SELECT 1").fetchone()
+            checks.append(("db connect", "ok", "reachable"))
+        except Exception as exc:  # noqa: BLE001
+            checks.append(("db connect", "fail", str(exc)))
+            conn = None
+
+    if conn is not None:
+        try:
+            from agentloom_runtime.db import migrate
+
+            group = None if args.group == "all" else args.group
+            states = migrate.status(group, conn=conn)
+            blocked = [s for s in states if s.state in ("pending", "changed", "missing")]
+            summary = ", ".join(
+                f"{state}={sum(1 for s in states if s.state == state)}"
+                for state in ("applied", "pending", "changed", "missing")
+                if any(s.state == state for s in states)
+            )
+            checks.append(("migrations", "fail" if blocked else "ok", summary))
+            for item in blocked:
+                checks.append((
+                    f"  {item.migration.filename}", "fail",
+                    {
+                        "pending": "not applied - run 'agentloom-session init'",
+                        "changed": "file differs from what was applied",
+                        "missing": "recorded/expected but the SQL file is absent",
+                    }[item.state],
+                ))
+        except Exception as exc:  # noqa: BLE001
+            checks.append(("migrations", "fail", str(exc)))
+        finally:
+            conn.close()
+
+    agent_id = args.agent or os.environ.get(DEFAULT_AGENT_ENV)
+    checks.append((
+        "agent id", "ok" if agent_id else "fail",
+        agent_id or f"unset - export {DEFAULT_AGENT_ENV}=<your-agent>",
+    ))
+    checks.append(("operator id", "ok", resolve_operator_id(args.operator)))
+
+    try:
+        workspace_key = args.workspace or detect_workspace_key(
+            Path(args.path) if args.path else None
+        )
+        local = workspace_key.startswith("local:")
+        checks.append((
+            "workspace key", "warn" if local else "ok",
+            workspace_key + (" (no VCS remote; will not match another machine)" if local else ""),
+        ))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("workspace key", "fail", str(exc)))
+
+    # The documented silent failure: an archive that embeds fine at index time
+    # while every query quietly falls back to lexical-only ranking.
+    try:
+        import contextlib
+        import io
+
+        from agentloom_runtime.memory.embedding_provider import embed_query, get_embedding_model
+
+        model = get_embedding_model()
+        # The provider narrates its own failure on the console. Swallow it:
+        # this check reports the outcome itself, and a stray line both muddles
+        # the report and risks making --json unparseable downstream.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            vector = embed_query("healthcheck", model=model)
+        if vector:
+            checks.append(("embeddings", "ok", f"{model} ({len(vector)} dims)"))
+        else:
+            checks.append(("embeddings", "warn", "no query vector; search is lexical-only"))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("embeddings", "warn", f"unavailable; search is lexical-only ({exc})"))
+
+    from agentloom_runtime.session.readers import READERS
+
+    root = Path(args.path) if args.path else Path.cwd()
+    for reader in READERS:
+        try:
+            found = reader.discover(root)
+        except Exception as exc:  # noqa: BLE001
+            checks.append((f"reader:{reader.host}", "warn", f"discovery failed ({exc})"))
+            continue
+        checks.append((
+            f"reader:{reader.host}", "ok" if found else "warn",
+            f"{len(found)} transcript(s) for this checkout" if found else "no transcripts here",
+        ))
+
+    return checks
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    checks = _doctor_checks(args)
+
+    if args.json:
+        payload = [{"check": name, "status": state, "detail": detail} for name, state, detail in checks]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        for name, state, detail in checks:
+            mark = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}.get(state, state)
+            print(f"[{mark}] {name:<22} {detail}")
+
+    failures = sum(1 for _, state, _ in checks if state == "fail")
+    if failures and not args.json:
+        print(f"\n{failures} check(s) failed.")
+    return 1 if failures else 0
+
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", help=f"agent id (default: ${DEFAULT_AGENT_ENV})")
     parser.add_argument("--operator", help="operator id (default: $AGENTLOOM_OPERATOR_ID or OS user)")
@@ -615,6 +789,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p)
     p.add_argument("--session", help="explicit session id")
     p.set_defaults(func=cmd_close)
+
+    p = sub.add_parser("init", help="create or update the database schema")
+    p.add_argument(
+        "--group",
+        choices=["session", "core", "all"],
+        default="session",
+        help="which schema to install (default: session — Layer 0 memory only)",
+    )
+    p.add_argument("--status", action="store_true", help="show migration state without changing anything")
+    p.add_argument(
+        "--baseline",
+        action="store_true",
+        help="record migrations as applied without executing them (adopt a hand-built database)",
+    )
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("doctor", help="check configuration, schema, identity, and hosts")
+    _add_common(p)
+    p.add_argument(
+        "--group",
+        choices=["session", "core", "all"],
+        default="session",
+        help="which schema to verify (default: session)",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("mcp", help="run the Model Context Protocol (MCP) server over stdio")
     p.set_defaults(func=cmd_mcp)

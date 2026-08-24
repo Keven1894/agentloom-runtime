@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from agentloom_runtime.session.readers.base import TranscriptReader, TranscriptSource
+from agentloom_runtime.session.readers.claude_code import ClaudeCodeTranscriptReader
 from agentloom_runtime.session.readers.cursor import CursorTranscriptReader
 
 __all__ = [
@@ -21,7 +22,10 @@ __all__ = [
     "get_reader",
 ]
 
-READERS: tuple[TranscriptReader, ...] = (CursorTranscriptReader(),)
+READERS: tuple[TranscriptReader, ...] = (
+    CursorTranscriptReader(),
+    ClaudeCodeTranscriptReader(),
+)
 
 
 def get_reader(host: str) -> Optional[TranscriptReader]:

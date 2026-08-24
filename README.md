@@ -34,34 +34,46 @@ Or with Make: `make install && make test`
 
 ### Database
 
-Apply CORE migrations (MySQL 8+) before using memory/KG modules:
+Configure the connection (below), then install the schema (MySQL 8+):
 
 ```bash
-mysql -h "$AGENTLOOM_DB_HOST" -u "$AGENTLOOM_DB_USER" -p "$AGENTLOOM_DB_NAME" \
-  < migrations/mysql/001_core_schema.sql
-mysql ... < migrations/mysql/002_memory_embeddings.sql
-mysql ... < migrations/mysql/003_kg_graph.sql
-mysql ... < migrations/mysql/004_session_memory.sql
-mysql ... < migrations/mysql/005_session_transcripts.sql
-mysql ... < migrations/mysql/006_session_transcript_index.sql
-mysql ... < migrations/mysql/007_session_lineage.sql
-mysql ... < migrations/mysql/008_session_transcript_vectors.sql
-mysql ... < migrations/mysql/009_drop_json_embeddings.sql
+agentloom-session init                 # Layer 0 session memory (default)
+agentloom-session init --group core    # messages, tasks, projects, KG
+agentloom-session init --group all
+agentloom-session init --status        # what is applied, without changing anything
 ```
 
-`004_session_memory.sql` is standalone: apply it on its own if you only want
-Layer 0 session continuity. `005_session_transcripts.sql` adds the conversation
-archive (requires 004). `006_session_transcript_index.sql` adds the archive
-locator (requires 005). `007_session_lineage.sql` adds session DAG topology
-(requires 004). `008_session_transcript_vectors.sql` adds compact float32
-embedding storage (requires 006).
+The two groups are independent. If all you want is cross-machine session
+continuity, install `session` and stop — it needs no CORE table, which is how
+the reference deployment runs.
 
-`009_drop_json_embeddings.sql` removes the superseded JSON embedding column.
-**Upgrading an existing archive**: apply 008, run `agentloom-session compact`
-until it reports zero conversions, then apply 009 and `OPTIMIZE TABLE
-session_transcript_chunks` — `DROP COLUMN` leaves the freed pages inside the
-tablespace. On a fresh install there is nothing to compact and the two can be
-applied together.
+`init` applies migrations in dependency order and records each one in
+`agentloom_schema_history`, so it is safe to re-run and safe to run after an
+upgrade: already-applied files are skipped and only new ones execute. The ledger
+also stores each file's checksum, so `doctor` can tell you when a migration was
+edited after it was applied — a change that `CREATE TABLE IF NOT EXISTS`
+otherwise hides completely.
+
+**Adopting a database whose tables you created by hand**, from before `init`
+existed:
+
+```bash
+agentloom-session init --baseline      # record as applied, without executing
+```
+
+Use this only when the tables really are already there. It is a separate verb
+rather than an automatic fallback because guessing wrong in either direction
+hurts: re-running an `ALTER` fails loudly, while skipping one that was never
+applied fails much later and quietly.
+
+**Upgrading an archive created before 008**: run `init` up to 008, then
+`agentloom-session compact` until it reports zero conversions, then `init`
+again for 009, then `OPTIMIZE TABLE session_transcript_chunks` — `DROP COLUMN`
+leaves the freed pages inside the tablespace. On a fresh install there is
+nothing to compact and `init` applies both in one pass.
+
+The raw SQL remains in `migrations/mysql/` if you prefer to apply it yourself or
+need to review it before it runs.
 
 Configure connection:
 
@@ -103,17 +115,25 @@ configuration.
 
 ### Verify the install
 
-The `agentloom-session` commands are console scripts. If they are missing, the
-bootstrap instructions given to agents silently do nothing:
-
 ```bash
-agentloom-session --help          # console script must resolve on PATH
-python -c "import agentloom_runtime; print(agentloom_runtime.__file__)"
+agentloom-session doctor --agent my-agent
 ```
 
-Confirm that path is the checkout you are editing. A stale `pip install -e`
-pointing at a second clone imports the wrong tree, and every symptom of it
-looks like a missing feature.
+One command, and it exits non-zero if anything is actually broken. It reports
+the imported package path, which `.env` was used, the database target (never the
+password), connectivity, migration state, the resolved identity, whether
+embeddings really work, and which hosts' transcripts are visible from here.
+
+Those are the checks worth automating because each one has a failure mode that
+does not announce itself:
+
+- A stale `pip install -e` pointing at a second clone imports the wrong tree,
+  and every symptom of it looks like a missing feature.
+- A missing `OPENAI_API_KEY` at query time downgrades search to lexical-only —
+  no error, plausible results, worse ranking.
+- A pending migration surfaces as `Unknown column` from something unrelated.
+- A workspace key that falls back to `local:` will never match another machine,
+  which is the whole point of Layer 0.
 
 ## Python API
 
@@ -298,6 +318,7 @@ retrieval pipeline that serves them.
 | [`docs/memory/three-layer-memory-architecture.md`](docs/memory/three-layer-memory-architecture.md) | The layered memory model: curated knowledge, management state, and plan/provenance — with a retrieval router and freshness rules. |
 | [`docs/memory/layer-0-session-memory.md`](docs/memory/layer-0-session-memory.md) | Cross-host working-session continuity: checkpoints vs. the transcript archive, why not to write the editor's chat database, the host-neutrality invariants, and the host adapter contract. |
 | [`docs/memory/memory-reconstruction.md`](docs/memory/memory-reconstruction.md) | **Start here for Layer 0.** The mechanism behind cross-machine continuity, in five diagrams: why identity is derived rather than transferred, how the VCS remote becomes a session key, what happens across two machines, and the three-tier retrieval cost ladder. |
+| [`docs/memory/adopting-layer-0.md`](docs/memory/adopting-layer-0.md) | **Mounting Layer 0 on your own agent**, without the CORE schema or any particular editor: install, schema, self-check, the bootstrap instruction, and how to add a reader for a host that is not yet supported. |
 | [`docs/memory/adr-001-kg-as-engine.md`](docs/memory/adr-001-kg-as-engine.md) | Architecture decision: the knowledge graph is the runtime *engine* via one graph-first pipeline, not a documentation-only artifact. |
 | [`docs/memory/kg-sync-and-maintenance.md`](docs/memory/kg-sync-and-maintenance.md) | The one-way file → database sync contract that keeps authored knowledge and runtime behavior in agreement. |
 | [`docs/agents/operational-agent-productization-playbook.md`](docs/agents/operational-agent-productization-playbook.md) | An 8-step process for turning a manual workflow into a governed, token-protected, dispatchable MCP agent. |

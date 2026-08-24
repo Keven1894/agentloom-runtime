@@ -183,10 +183,54 @@ class TranscriptDocument:
     source_ref: str
     turns: list[TranscriptTurn] = field(default_factory=list)
     redaction_count: int = 0
+    # A title the host itself recorded, when it has one. Preferred over the
+    # derived title because a host that names its own conversations knows more
+    # than any rule applied afterwards to the opening prompts.
+    title_hint: Optional[str] = None
 
     @property
     def turn_count(self) -> int:
         return len(self.turns)
+
+    @property
+    def title(self) -> str:
+        """A human-readable name for the conversation.
+
+        Prefers the host's own title. Otherwise derive one from the opening
+        human prompts, skipping leading @file references and XML wrappers. If
+        the first prompt is a short greeting or onboarding preamble, pair it
+        with the next one — "onboard first" names every session equally badly.
+        """
+        if self.title_hint and self.title_hint.strip():
+            return self.title_hint.strip()[:100]
+
+        prompts: list[str] = []
+        for turn in self.turns:
+            if turn.role == "human":
+                for block in turn.blocks:
+                    if block.type == "text" and block.text:
+                        txt = block.text.strip()
+                        txt = re.sub(r"^(?:@\S+\s*)+", "", txt).strip()
+                        txt = re.sub(r"<[^>]+>", "", txt).strip()
+                        if txt:
+                            line = txt.split("\n")[0].strip()
+                            if line:
+                                prompts.append(line)
+                                break
+        if not prompts:
+            return self.source_ref[:8] if self.source_ref else "Untitled conversation"
+
+        p1 = prompts[0]
+        is_generic_onboard = bool(
+            re.match(
+                r"^(?:来[，,]?\s*)?(?:先)?(?:来)?\s*(?:onboard(?:ing)?|开始|你好|hi|hello)\s*(?:一下)?(?:的|先|吧)?[\s!！。.]*$",
+                p1,
+                re.IGNORECASE,
+            )
+        )
+        if is_generic_onboard and len(prompts) > 1:
+            return f"{p1} → {prompts[1][:80]}"
+        return p1[:100]
 
     def tail(self, limit: int) -> "TranscriptDocument":
         if limit <= 0 or limit >= len(self.turns):
@@ -196,6 +240,7 @@ class TranscriptDocument:
             source_ref=self.source_ref,
             turns=self.turns[-limit:],
             redaction_count=self.redaction_count,
+            title_hint=self.title_hint,
         )
 
     def around(self, seq: int, radius: int = 10) -> "TranscriptDocument":
@@ -213,16 +258,23 @@ class TranscriptDocument:
             source_ref=self.source_ref,
             turns=turns,
             redaction_count=self.redaction_count,
+            title_hint=self.title_hint,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        # ``title`` is the resolved value for consumers; ``title_hint`` is the
+        # raw input that produced it, so a stored document round-trips.
+        payload: dict[str, Any] = {
             "schema": 1,
             "source_host": self.source_host,
             "source_ref": self.source_ref,
+            "title": self.title,
             "redaction_count": self.redaction_count,
             "turns": [t.to_dict() for t in self.turns],
         }
+        if self.title_hint:
+            payload["title_hint"] = self.title_hint
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TranscriptDocument":
@@ -231,6 +283,7 @@ class TranscriptDocument:
             source_ref=data.get("source_ref", ""),
             turns=[TranscriptTurn.from_dict(t) for t in data.get("turns", [])],
             redaction_count=int(data.get("redaction_count", 0)),
+            title_hint=data.get("title_hint"),
         )
 
 

@@ -17,6 +17,10 @@ from agentloom_runtime.session.readers.base import (
     TranscriptReader,
     summarize_tool_input,
 )
+from agentloom_runtime.session.readers.claude_code import (
+    ClaudeCodeTranscriptReader,
+    project_slug,
+)
 from agentloom_runtime.session.readers.cursor import CursorTranscriptReader, workspace_slug
 from agentloom_runtime.session.transcript import (
     TranscriptDocument,
@@ -251,6 +255,110 @@ def test_malformed_lines_are_skipped_not_fatal(tmp_path):
     assert reader.read(reader.discover(workspace)[0]).turn_count == 3
 
 
+# --------------------------------------------------------------------------
+# claude code reader — the second host, which is what proves the seam is a seam
+# --------------------------------------------------------------------------
+
+
+def _write_claude_transcript(root, slug: str, ref: str, lines: list[dict]):
+    project = root / slug
+    project.mkdir(parents=True, exist_ok=True)
+    path = project / f"{ref}.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(line, ensure_ascii=False) for line in lines),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _claude_lines() -> list[dict]:
+    """Shaped after a transcript Claude Code actually wrote."""
+    return [
+        {"type": "mode", "mode": "default"},
+        {"type": "file-history-snapshot", "snapshot": {}},
+        {"type": "ai-title", "aiTitle": "Fix the retry backoff"},
+        {"type": "user", "message": {"role": "user", "content": "why is it retrying?"}},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "internal reasoning, not archived"},
+                    {"type": "text", "text": "The backoff resets on every attempt."},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "retry.py"}},
+                ],
+            },
+        },
+        # A sub-agent's own conversation, interleaved into the same file.
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "subagent noise"}]},
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "content": "big tool output"}],
+            },
+        },
+    ]
+
+
+def test_claude_code_slug_maps_each_separator_to_one_dash():
+    assert project_slug(Path("C:/Users/dev")) == "C--Users-dev"
+    assert project_slug(Path("/home/dev/widget")) == "-home-dev-widget"
+
+
+def test_claude_code_reader_parses_a_real_shaped_transcript(tmp_path):
+    workspace = tmp_path / "widget"
+    workspace.mkdir()
+    root = tmp_path / "claude-projects"
+    _write_claude_transcript(root, project_slug(workspace.resolve()), "sess-1", _claude_lines())
+
+    reader = ClaudeCodeTranscriptReader(projects_root=root)
+    sources = reader.discover(workspace)
+    assert [s.ref for s in sources] == ["sess-1"]
+
+    doc = reader.read(sources[0])
+    assert doc.source_host == "claude-code"
+    # user (string content) + assistant (text + tool_use). Bookkeeping lines,
+    # the sidechain turn, and the tool_result-only turn all produce nothing.
+    assert [t.role for t in doc.turns] == ["human", "agent"]
+    assert doc.turns[0].text == "why is it retrying?"
+    assert [b.type for b in doc.turns[1].blocks] == ["text", "tool_use"]
+    assert doc.turns[1].blocks[1].tool_name == "Read"
+
+
+def test_claude_code_thinking_blocks_are_not_archived(tmp_path):
+    workspace = tmp_path / "widget"
+    workspace.mkdir()
+    root = tmp_path / "claude-projects"
+    _write_claude_transcript(root, project_slug(workspace.resolve()), "sess-1", _claude_lines())
+    reader = ClaudeCodeTranscriptReader(projects_root=root)
+    doc = reader.read(reader.discover(workspace)[0])
+    assert "internal reasoning" not in json.dumps(doc.to_dict(), ensure_ascii=False)
+
+
+def test_claude_code_host_title_wins_over_the_derived_one(tmp_path):
+    workspace = tmp_path / "widget"
+    workspace.mkdir()
+    root = tmp_path / "claude-projects"
+    _write_claude_transcript(root, project_slug(workspace.resolve()), "sess-1", _claude_lines())
+    reader = ClaudeCodeTranscriptReader(projects_root=root)
+    doc = reader.read(reader.discover(workspace)[0])
+
+    assert doc.title_hint == "Fix the retry backoff"
+    assert doc.title == "Fix the retry backoff"
+    # And it survives being stored and loaded back.
+    assert TranscriptDocument.from_dict(doc.to_dict()).title == "Fix the retry backoff"
+
+
+def test_claude_code_absent_host_yields_no_sources(tmp_path):
+    reader = ClaudeCodeTranscriptReader(projects_root=tmp_path / "nope")
+    assert reader.discover(tmp_path) == []
+
+
 def test_absent_host_yields_no_sources_rather_than_an_error(tmp_path):
     reader = CursorTranscriptReader(projects_root=tmp_path / "does-not-exist")
     assert reader.discover(tmp_path) == []
@@ -317,3 +425,34 @@ def test_renderers_show_both_prose_and_tool_calls(tmp_path):
         assert "Why?" in rendered
         assert "Because of the remote." in rendered
         assert "Read" in rendered
+
+
+def test_transcript_document_title_derivation():
+    from agentloom_runtime.session.transcript import TranscriptBlock, TranscriptDocument, TranscriptTurn
+
+    # Simple prompt
+    doc1 = TranscriptDocument(
+        source_host="cursor",
+        source_ref="ref-123456",
+        turns=[
+            TranscriptTurn(seq=1, role="human", blocks=[TranscriptBlock(type="text", text="@agents/BOOTSTRAP.md\n\nFix database connection leak in worker")]),
+        ],
+    )
+    assert doc1.title == "Fix database connection leak in worker"
+
+    # Generic onboarding preamble + second substantive prompt
+    doc2 = TranscriptDocument(
+        source_host="cursor",
+        source_ref="ref-789012",
+        turns=[
+            TranscriptTurn(seq=1, role="human", blocks=[TranscriptBlock(type="text", text="来，onboarding一下的")]),
+            TranscriptTurn(seq=2, role="agent", blocks=[TranscriptBlock(type="text", text="Ready!")]),
+            TranscriptTurn(seq=3, role="human", blocks=[TranscriptBlock(type="text", text="好的，看一下这个plan并迁移MySQL schema")]),
+        ],
+    )
+    assert doc2.title == "来，onboarding一下的 → 好的，看一下这个plan并迁移MySQL schema"
+
+    # Empty turns fallback
+    doc3 = TranscriptDocument(source_host="cursor", source_ref="abc-12345678", turns=[])
+    assert doc3.title == "abc-1234"
+

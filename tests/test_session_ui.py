@@ -193,10 +193,19 @@ def test_transcript_listing_honours_the_requested_limit():
 
     with patch(
         "agentloom_runtime.session.store.list_transcripts", autospec=True, side_effect=fake_list
+    ), patch(
+        "agentloom_runtime.session.store.count_transcripts", autospec=True, return_value=42
     ):
-        _call_handler("/api/transcripts?limit=7")
+        resp_bytes = _call_handler("/api/transcripts?limit=7&offset=14")
 
     assert captured["limit"] == 7
+    assert captured["offset"] == 14
+    body = resp_bytes.split(b"\r\n\r\n", 1)[1]
+    data = json.loads(body)
+    assert data["total"] == 42
+    assert data["limit"] == 7
+    assert data["offset"] == 14
+    assert isinstance(data["items"], list)
 
 
 def test_viewer_search_uses_the_archives_embeddings():

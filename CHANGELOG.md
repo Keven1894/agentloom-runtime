@@ -108,6 +108,19 @@
 
 ### Fixed
 
+- **The CORE schema could not be installed on MySQL at all.** All three CORE
+  migrations declared indexes with `CREATE INDEX IF NOT EXISTS`, which is
+  MariaDB syntax; MySQL rejects it with a syntax error. Twenty-nine statements
+  across `001`, `002` and `003` now use plain `CREATE INDEX` — the index
+  definitions themselves are unchanged. Nothing caught this because the files
+  were only ever applied by hand, one at a time; `agentloom-session init`
+  applying them in sequence against an empty database is what surfaced it. A
+  test now rejects the syntax, and the whole schema — 24 tables, 68 indexes —
+  is verified to install from scratch on MySQL 8.
+
+  Session migrations were never affected: `004` declares its indexes inline and
+  its header comment already recorded the reason.
+
 - Vector search reached the database but never the query. The adapter and the
   embedding provider each discovered configuration by their own rules, so a
   deployment could hold a fully embedded archive while every search silently
@@ -134,6 +147,47 @@
   wrong data with no exception raised. It now matches `sqlite3.Row` and the
   DB-API. Key-based membership (`"col" in row`) is unchanged.
 
+- **Schema installation** — `agentloom-session init` replaces pasting ten
+  `mysql < file.sql` commands in an order documented only in prose.
+  - Two independent groups: `session` (Layer 0, the default) and `core`
+    (messages, tasks, projects, KG). Layer 0 installs without a single CORE
+    table, which is how the reference deployment already runs.
+  - `agentloom_schema_history` records what has been applied, keyed by filename
+    and fingerprinted by checksum, so `init` is safe to re-run and `doctor`
+    reports a migration edited after it was applied — a change that
+    `CREATE TABLE IF NOT EXISTS` otherwise hides completely. The ledger is the
+    tool's own table, created outside the numbered sequence so it works for any
+    group. The legacy `schema_version` table from `001_core_schema.sql` is a
+    hand-maintained log and is left untouched.
+  - `--baseline` records migrations as applied without executing them, to adopt
+    a database whose tables were created by hand. A separate verb rather than an
+    automatic fallback: re-running an `ALTER` fails loudly, while skipping one
+    that was never applied fails much later and quietly.
+  - Statement splitting tracks quoting and comment state instead of splitting on
+    `;`, which is wrong the moment a semicolon appears inside a string literal.
+  - A test asserts every `.sql` file on disk is classified. `init` iterates the
+    manifest rather than the directory, so an unclassified file would never be
+    applied and would surface as `Unknown column` from something unrelated.
+
+- **`agentloom-session doctor`** — one command that exits non-zero when the
+  install is actually broken, covering the failure modes that do not announce
+  themselves: an imported package path from a stale second clone, a missing
+  `.env`, pending or edited migrations, an unset agent id, a `local:` workspace
+  key that will never match another machine, an embedding provider that
+  downgrades search to lexical-only without erroring, and which hosts have
+  transcripts visible from this checkout. Reports the database target and
+  whether a password resolved, never the password.
+
+- **Claude Code transcript reader** — the second host, which is what makes the
+  reader seam a seam rather than an aspiration. Reads
+  `~/.claude/projects/<cwd-with-separators-as-dashes>/<uuid>.jsonl`, skipping
+  bookkeeping lines, sub-agent sidechains, `thinking` blocks, and tool results.
+  Written against a transcript Claude Code actually wrote, not an assumed shape.
+
+- `TranscriptDocument.title_hint` — a title the host recorded itself, preferred
+  over the derived one. Claude Code names its own conversations; a rule applied
+  afterwards to the opening prompts cannot beat that.
+
 ### Changed
 
 - The MCP server no longer defaults `agent_id`/`operator_id` to any particular
@@ -146,6 +200,12 @@
   does not have passed its tests and failed on first real use.
 
 ### Documentation
+
+- `docs/memory/adopting-layer-0.md` — mounting Layer 0 on someone else's agent
+  without the CORE schema or a particular editor: install, `init`, `doctor`, the
+  bootstrap instruction, and the two contracts a new host reader must satisfy
+  (never write to a host's storage; treat every parsing step as optional). The
+  README's ten-command schema block is replaced by the single command.
 
 - `docs/memory/layer-0-session-memory.md` — separates the four problems behind
   "sync my sessions" (capture, move, reconstruct, repaint in a vendor UI) and

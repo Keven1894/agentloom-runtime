@@ -17,6 +17,7 @@ def test_core_migration_files_exist():
         MIGRATIONS / "006_session_transcript_index.sql",
         MIGRATIONS / "007_session_lineage.sql",
         MIGRATIONS / "008_session_transcript_vectors.sql",
+        MIGRATIONS / "010_session_transcript_titles.sql",
     ]
     for path in files:
         assert path.is_file(), path.name
@@ -60,6 +61,23 @@ def test_session_lineage_migration_adds_dag_columns():
     assert "`fk_agent_sessions_parent`" in sql
     assert "`fk_agent_sessions_fork_checkpoint`" in sql
     assert "ON DELETE SET NULL" in sql
+
+
+def test_transcript_title_arrives_as_its_own_migration():
+    """A shipped migration must never be edited in place.
+
+    `005` creates the table with `IF NOT EXISTS`, so re-running it against a
+    deployment that already applied it is a no-op. Adding `title` there would
+    mean every existing install silently lacks the column and every listing
+    query fails on `Unknown column 'title'`. New columns get a new file.
+    """
+    create = (MIGRATIONS / "005_session_transcripts.sql").read_text(encoding="utf-8")
+    assert "`title`" not in create
+
+    alter = (MIGRATIONS / "010_session_transcript_titles.sql").read_text(encoding="utf-8")
+    assert "ALTER TABLE `session_transcripts`" in alter
+    assert "ADD COLUMN `title`" in alter
+    assert "DROP" not in alter.upper()
 
 
 def test_vector_migration_adds_compact_columns_without_dropping_the_old_one():

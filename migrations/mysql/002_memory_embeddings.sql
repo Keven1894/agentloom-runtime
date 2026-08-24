@@ -15,9 +15,9 @@ CREATE TABLE IF NOT EXISTS `message_embeddings` (
   `updated_at` DATETIME NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE INDEX IF NOT EXISTS `idx_msg_emb_message` ON `message_embeddings` (`message_id`);
-CREATE INDEX IF NOT EXISTS `idx_msg_emb_reply` ON `message_embeddings` (`reply_id`);
-CREATE INDEX IF NOT EXISTS `idx_msg_emb_model` ON `message_embeddings` (`embedding_model`);
+CREATE INDEX `idx_msg_emb_message` ON `message_embeddings` (`message_id`);
+CREATE INDEX `idx_msg_emb_reply` ON `message_embeddings` (`reply_id`);
+CREATE INDEX `idx_msg_emb_model` ON `message_embeddings` (`embedding_model`);
 
 CREATE TABLE IF NOT EXISTS `docshare_embeddings` (
   `id` VARCHAR(191) NOT NULL,
@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS `docshare_embeddings` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE INDEX IF NOT EXISTS `idx_docshare_emb_doc` ON `docshare_embeddings` (`doc_id`);
-CREATE INDEX IF NOT EXISTS `idx_docshare_emb_source` ON `docshare_embeddings` (`source_path`(191));
-CREATE INDEX IF NOT EXISTS `idx_docshare_emb_model` ON `docshare_embeddings` (`embedding_model`);
+CREATE INDEX `idx_docshare_emb_doc` ON `docshare_embeddings` (`doc_id`);
+CREATE INDEX `idx_docshare_emb_source` ON `docshare_embeddings` (`source_path`(191));
+CREATE INDEX `idx_docshare_emb_model` ON `docshare_embeddings` (`embedding_model`);
 
 CREATE TABLE IF NOT EXISTS `plan_embeddings` (
   `id` VARCHAR(191) PRIMARY KEY,
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS `plan_embeddings` (
   `updated_at` DATETIME NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE INDEX IF NOT EXISTS `idx_plan_emb_path` ON `plan_embeddings` (`path`);
-CREATE INDEX IF NOT EXISTS `idx_plan_emb_lifecycle` ON `plan_embeddings` (`lifecycle`);
-CREATE INDEX IF NOT EXISTS `idx_plan_emb_project` ON `plan_embeddings` (`project_id`);
-CREATE INDEX IF NOT EXISTS `idx_plan_emb_model` ON `plan_embeddings` (`embedding_model`);
+CREATE INDEX `idx_plan_emb_path` ON `plan_embeddings` (`path`);
+CREATE INDEX `idx_plan_emb_lifecycle` ON `plan_embeddings` (`lifecycle`);
+CREATE INDEX `idx_plan_emb_project` ON `plan_embeddings` (`project_id`);
+CREATE INDEX `idx_plan_emb_model` ON `plan_embeddings` (`embedding_model`);

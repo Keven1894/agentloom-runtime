@@ -39,6 +39,7 @@ __all__ = [
     "get_workspace_session_tree",
     "index_transcript",
     "compact_embeddings",
+    "count_transcripts",
     "index_workspace",
     "list_checkpoints",
     "list_transcripts",
@@ -558,7 +559,7 @@ def get_workspace_session_tree(workspace_key: str) -> list[dict[str, Any]]:
 
 _TRANSCRIPT_COLUMNS = (
     "transcript_id, session_id, source_host, source_ref, workspace_key, agent_id, "
-    "operator_id, captured_at, turn_count, redaction_count, body_bytes, content_sha256"
+    "operator_id, title, captured_at, turn_count, redaction_count, body_bytes, content_sha256"
 )
 
 
@@ -573,6 +574,7 @@ class TranscriptRecord:
     workspace_key: str
     agent_id: Optional[str] = None
     operator_id: Optional[str] = None
+    title: Optional[str] = None
     captured_at: Optional[str] = None
     turn_count: int = 0
     redaction_count: int = 0
@@ -589,6 +591,7 @@ class TranscriptRecord:
             workspace_key=row["workspace_key"],
             agent_id=row["agent_id"],
             operator_id=row["operator_id"],
+            title=row["title"],
             captured_at=_iso(row["captured_at"]),
             turn_count=int(row["turn_count"]),
             redaction_count=int(row["redaction_count"]),
@@ -617,6 +620,7 @@ def store_transcript(
     body = json.dumps(doc.to_dict(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     digest = hashlib.sha256(body).hexdigest()
     compressed = zlib.compress(body, 6)
+    title = doc.title
 
     conn = connect()
     try:
@@ -635,7 +639,7 @@ def store_transcript(
                 UPDATE session_transcripts
                 SET session_id = COALESCE(?, session_id),
                     workspace_key = ?, agent_id = ?, operator_id = ?,
-                    turn_count = ?, redaction_count = ?, body_bytes = ?,
+                    title = ?, turn_count = ?, redaction_count = ?, body_bytes = ?,
                     content_sha256 = ?, body_zlib = ?
                 WHERE transcript_id = ?
                 """,
@@ -644,6 +648,7 @@ def store_transcript(
                     workspace_key,
                     agent_id,
                     operator_id,
+                    title,
                     doc.turn_count,
                     doc.redaction_count,
                     len(body),
@@ -658,9 +663,9 @@ def store_transcript(
                 """
                 INSERT INTO session_transcripts
                     (transcript_id, session_id, source_host, source_ref, workspace_key,
-                     agent_id, operator_id, turn_count, redaction_count, body_bytes,
+                     agent_id, operator_id, title, turn_count, redaction_count, body_bytes,
                      content_sha256, body_zlib)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     transcript_id,
@@ -670,6 +675,7 @@ def store_transcript(
                     workspace_key,
                     agent_id,
                     operator_id,
+                    title,
                     doc.turn_count,
                     doc.redaction_count,
                     len(body),
@@ -686,11 +692,43 @@ def store_transcript(
         conn.close()
 
 
+def count_transcripts(
+    workspace_key: Optional[str] = None,
+    session_id: Optional[str] = None,
+    source_ref: Optional[str] = None,
+) -> int:
+    """Return the total number of archived transcripts matching the filters."""
+    clauses: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("workspace_key", workspace_key),
+        ("session_id", session_id),
+        ("source_ref", source_ref),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM session_transcripts {where}",
+            params,
+        ).fetchone()
+        if not row:
+            return 0
+        return int(row[0])
+    finally:
+        conn.close()
+
+
 def list_transcripts(
     workspace_key: Optional[str] = None,
     session_id: Optional[str] = None,
     source_ref: Optional[str] = None,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[TranscriptRecord]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -704,12 +742,17 @@ def list_transcripts(
             params.append(value)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(int(limit))
+    if offset > 0:
+        params.append(int(offset))
+        pagination = "LIMIT ? OFFSET ?"
+    else:
+        pagination = "LIMIT ?"
 
     conn = connect()
     try:
         rows = conn.execute(
             f"SELECT {_TRANSCRIPT_COLUMNS} FROM session_transcripts {where} "
-            "ORDER BY captured_at DESC LIMIT ?",
+            f"ORDER BY captured_at DESC {pagination}",
             params,
         ).fetchall()
         return [TranscriptRecord.from_row(row) for row in rows]
