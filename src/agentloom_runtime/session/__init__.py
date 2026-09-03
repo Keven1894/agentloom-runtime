@@ -8,16 +8,21 @@ the answer survives switching machines or IDEs.
 """
 
 from agentloom_runtime.session.identity import (
+    DEFAULT_LANE,
     HostContext,
     detect_host_context,
     detect_workspace_key,
     normalize_workspace_key,
+    resolve_lane,
     resolve_operator_id,
 )
 from agentloom_runtime.session.readers import discover_transcripts, get_reader
 from agentloom_runtime.session.store import (
     ArchiveHit,
+    LanesUnavailableError,
     ResumePack,
+    SessionInUseError,
+    SessionOpenError,
     SessionRecord,
     TranscriptRecord,
     add_turn,
@@ -29,14 +34,19 @@ from agentloom_runtime.session.store import (
     index_transcript,
     index_workspace,
     list_checkpoints,
+    list_session_hosts,
     list_transcripts,
+    live_hosts,
     load_transcript,
     open_session,
     park_session,
+    touch_host,
     render_resume_pack,
     resume,
     search_archive,
     search_sessions,
+    set_transcript_presentation,
+    set_transcript_title,
     store_transcript,
 )
 from agentloom_runtime.session.transcript import (
@@ -49,8 +59,12 @@ from agentloom_runtime.session.vcs import VcsState, collect_vcs_state
 
 __all__ = [
     "ArchiveHit",
+    "DEFAULT_LANE",
     "HostContext",
+    "LanesUnavailableError",
     "ResumePack",
+    "SessionInUseError",
+    "SessionOpenError",
     "SessionRecord",
     "TranscriptDocument",
     "TranscriptRecord",
@@ -69,7 +83,9 @@ __all__ = [
     "index_transcript",
     "index_workspace",
     "list_checkpoints",
+    "list_session_hosts",
     "list_transcripts",
+    "live_hosts",
     "load_transcript",
     "normalize_workspace_key",
     "open_session",
@@ -78,9 +94,12 @@ __all__ = [
     "render_markdown",
     "render_resume_pack",
     "render_text",
+    "resolve_lane",
     "resolve_operator_id",
     "resume",
+    "touch_host",
     "search_archive",
     "search_sessions",
+    "set_transcript_presentation",
     "store_transcript",
 ]

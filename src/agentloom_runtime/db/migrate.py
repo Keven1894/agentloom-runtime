@@ -78,6 +78,13 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration("008_session_transcript_vectors.sql", "session", "compact float32 embeddings"),
     Migration("009_drop_json_embeddings.sql", "session", "retire JSON embedding column"),
     Migration("010_session_transcript_titles.sql", "session", "human-readable titles"),
+    Migration("011_session_transcript_title_source.sql", "session", "lock user-renamed titles"),
+    Migration("012_session_transcript_captured_at_is_host_mtime.sql", "session", "captured_at follows host file mtime"),
+    Migration("013_session_transcript_presentation.sql", "session", "trilingual title and description pack"),
+    Migration("014_session_transcript_chunk_locale.sql", "session", "search index rows per display locale"),
+    Migration("015_session_job_trace.sql", "session", "batch job runs, per-item state, event trace"),
+    Migration("016_session_lanes.sql", "session", "lane column and per-host activity"),
+    Migration("017_session_lane_identity.sql", "session", "lane joins the open-session key"),
 )
 
 
@@ -283,6 +290,7 @@ def apply_migrations(
     group: Optional[str] = None,
     baseline: bool = False,
     conn=None,
+    through: Optional[str] = None,
 ) -> list[tuple[str, str]]:
     """Apply every pending migration in order. Returns ``(filename, action)``.
 
@@ -292,16 +300,33 @@ def apply_migrations(
     is destructive: re-running an ``ALTER`` fails loudly, and skipping one that
     was never applied fails much later and quietly.
 
+    ``through`` stops after the named migration, matched on a filename prefix
+    so ``"016"`` is enough. An expand/contract rollout needs this: the widening
+    half is safe to apply while other hosts still run old code, the narrowing
+    half is not, and the gap between them is where those hosts get upgraded.
+
     Already-applied migrations are skipped, so this is safe to re-run.
     """
     own = conn is None
     conn = conn or connect()
     actions: list[tuple[str, str]] = []
+    selected = _selected(group)
+
+    if through:
+        stop = next(
+            (i for i, m in enumerate(selected) if m.filename.startswith(through)), None
+        )
+        if stop is None:
+            raise ValueError(
+                f"no migration matching {through!r} in group {group or 'all'}"
+            )
+        selected = selected[: stop + 1]
+
     try:
         ensure_ledger(conn)
         recorded = _ledger_rows(conn)
 
-        for migration in _selected(group):
+        for migration in selected:
             if migration.filename in recorded:
                 actions.append((migration.filename, "skipped"))
                 continue

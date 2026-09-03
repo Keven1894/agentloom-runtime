@@ -124,6 +124,7 @@ agentloom-session replay --last 20   # read the most recent conversation back
 agentloom-session index --all        # build the archive locator (prose chunks + embeddings)
 agentloom-session search "password policy"   # pointers into the archive
 # then: agentloom-session replay --ref <id> --around <seq>
+agentloom-session present --ref <id>         # trilingual overlay via local chat model
 
 agentloom-session mcp          # run stdio JSON-RPC MCP server
 agentloom-session ui           # launch local web dashboard on port 8766
@@ -181,7 +182,8 @@ resume, the state was never really in Layer 0.
 ## Data model
 
 Four tables plus a locator (`migrations/mysql/004_session_memory.sql`,
-`005_session_transcripts.sql`, `006_session_transcript_index.sql`):
+`005_session_transcripts.sql`, `006_session_transcript_index.sql`), then
+additive migrations for listing copy, locale, and batch-job traces:
 
 | Table | Holds |
 |---|---|
@@ -189,7 +191,21 @@ Four tables plus a locator (`migrations/mysql/004_session_memory.sql`,
 | `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, transcript citations |
 | `session_turns` | optional short turn summaries |
 | `session_transcripts` | archived conversations, redacted and compressed, keyed by `(source_host, source_ref)` |
-| `session_transcript_chunks` | search index over the archive: session-level nodes + overlapping prose windows (human/agent text only). Embeddings optional; lexical search works without them. |
+| `session_transcript_chunks` | search index over the archive: session-level nodes + overlapping prose windows (human/agent text only). Embeddings optional; lexical search works without them. `locale` (`original` / `en` / `es`) is part of the unique key so translated overlays do not collide with the original. |
+| `session_job_runs` | one invocation of a long-running job over the archive (host, models, filters) |
+| `session_job_items` | per-transcript job state, keyed `(job_kind, transcript_id)`, fingerprinted against the archive body |
+| `session_job_events` | append-only typed events, monotonic `seq` within a run |
+
+`session_transcripts.presentation_json` (migration 013) is an optional overlay:
+trilingual title and description, plus per-turn English/Spanish text. The
+archive body is never rewritten to store a translation. Missing overlay
+sequences fall back to the original, so a partial translation is a legal state.
+
+Batch work that produces overlays — translation, re-embedding, review — writes
+progress and judgement to `session_job_*` (migration 015), not to a file beside
+the checkout. Overlay presence is derivable from `presentation_json`; the
+reviewer's verdict is not, which is why it has its own column
+(`qc_report_json`). The runtime module is `agentloom_runtime.session.jobs`.
 
 ### What is stored
 
@@ -231,6 +247,7 @@ Add one row to the router:
 | "Where did we leave off in this repository?" | **Layer 0 checkpoints** |
 | "What exactly did we say about it?" | **Layer 0 transcript archive** (`replay`) |
 | "When did we decide X?" | **Layer 0 archive locator** (`search` → `replay --around`) |
+| "Find that discussion in another language" | **Layer 0 locator** rows with `locale=en` / `es` |
 | "What is the accepted design?" | Layer 1 curated knowledge |
 | "What is the team doing now?" | Layer 2 management |
 | "Did we plan this before?" | Layer 3 plan / provenance |
@@ -244,7 +261,8 @@ become the authority.
 The locator indexes **prose only** (human + agent text), at two granularities
 (one session node + overlapping turn windows), and ranks with hybrid lexical +
 vector RRF. Time is a filter (`--since`), not something cosine is asked to
-encode. Tool-call noise is not embedded.
+encode. Tool-call noise is not embedded. Translated overlays are additional
+rows with `locale=en` or `locale=es`; they do not replace the original.
 
 ## Anti-patterns
 
@@ -255,9 +273,13 @@ encode. Tool-call noise is not embedded.
 - Loading a full transcript on every resume instead of the checkpoint that cites it.
 - Archiving a transcript without the redaction pass.
 - Requiring an editor extension for any operation.
+- Rewriting `body_zlib` to store a translation.
+- Keeping job resume state or review verdicts in a checkout-local file.
+- Keying per-transcript job state on the run rather than `(job_kind, transcript_id)`.
 
 ## Related
 
 - [`memory-reconstruction.md`](memory-reconstruction.md) — the mechanism behind this contract, in diagrams: reconstruction vs. migration, identity derivation, the cross-machine lifecycle, and the retrieval cost ladder.
+- Envita companion: `docs/architecture/memory/layer-0-archive-presentation-and-job-trace.md` in the deployment repository — overlay shape, locale index, job-trace tables, translator vs. independent reviewer.
 - [`three-layer-memory-architecture.md`](three-layer-memory-architecture.md) — layers 1–3 and the retrieval router.
 - [`kg-sync-and-maintenance.md`](kg-sync-and-maintenance.md) — the file → database sync contract.

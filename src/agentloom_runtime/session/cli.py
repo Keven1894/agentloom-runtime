@@ -18,6 +18,7 @@ from agentloom_runtime.session import store
 from agentloom_runtime.session.identity import (
     detect_host_context,
     detect_workspace_key,
+    resolve_lane,
     resolve_operator_id,
 )
 from agentloom_runtime.session.readers import discover_transcripts, get_reader
@@ -41,19 +42,25 @@ def _identity(args: argparse.Namespace) -> tuple[str, str, str]:
     return agent_id, operator_id, workspace_key
 
 
+def _lane(args: argparse.Namespace) -> str:
+    return resolve_lane(getattr(args, "lane", None))
+
+
 def _emit(payload: Any, text: str, as_json: bool) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False, default=str) if as_json else text)
 
 
 def _resolve_session_id(args: argparse.Namespace) -> str:
-    """Find the session to act on: explicit id, else the identity's open one."""
+    """Find the session to act on: explicit id, else this identity+lane's open one."""
     if getattr(args, "session", None):
         return args.session
     agent_id, operator_id, workspace_key = _identity(args)
-    pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=0)
+    lane = _lane(args)
+    pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=0, lane=lane)
     if pack is None:
         raise SystemExit(
-            "error: no open session for this identity. Run 'agentloom-session open' first."
+            f"error: no open session for this identity in lane '{lane}'. "
+            "Run 'agentloom-session open' first."
         )
     return pack.session.session_id
 
@@ -87,18 +94,31 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 def cmd_open(args: argparse.Namespace) -> int:
     agent_id, operator_id, workspace_key = _identity(args)
     host = detect_host_context(Path(args.path) if args.path else None)
-    session, created = store.open_session(
-        agent_id,
-        operator_id,
-        workspace_key,
-        title=args.title,
-        host=host,
-        parent_session_id=getattr(args, "fork_from", None),
-        fork_checkpoint_id=getattr(args, "checkpoint", None),
-        fork_reason=getattr(args, "reason", None),
-    )
+    lane = _lane(args)
+    try:
+        session, created = store.open_session(
+            agent_id,
+            operator_id,
+            workspace_key,
+            title=args.title,
+            host=host,
+            parent_session_id=getattr(args, "fork_from", None),
+            fork_checkpoint_id=getattr(args, "checkpoint", None),
+            fork_reason=getattr(args, "reason", None),
+            lane=lane,
+            force=getattr(args, "force", False),
+        )
+    except store.SessionInUseError as exc:
+        raise SystemExit(
+            f"error: {exc}\n"
+            "  If this is different work, give it its own lane:\n"
+            "    agentloom-session open --lane <name>\n"
+            "  If you really are taking the thread over, re-run with --force."
+        )
+    except store.SessionOpenError as exc:
+        raise SystemExit(f"error: {exc}")
     verb = "opened" if created else "reusing open"
-    msg = f"{verb} session {session.session_id} for {workspace_key}"
+    msg = f"{verb} session {session.session_id} in lane '{session.lane}' for {workspace_key}"
     if session.parent_session_id:
         msg += f" (forked from {session.parent_session_id[:8]}.. reason: {session.fork_reason})"
     _emit(
@@ -111,10 +131,23 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     agent_id, operator_id, workspace_key = _identity(args)
-    pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=args.turns)
+    host = detect_host_context(Path(args.path) if args.path else None)
+    pack = store.resume(
+        agent_id,
+        operator_id,
+        workspace_key,
+        turn_limit=args.turns,
+        lane=_lane(args),
+        host=host,
+    )
+
+    payload = pack.to_dict() if pack else None
+    if payload is not None:
+        payload["host_switch"] = store.detect_host_switch(pack, host.host_hint)
+
     _emit(
-        pack.to_dict() if pack else None,
-        store.render_resume_pack(pack),
+        payload,
+        store.render_resume_pack(pack, current_host=host.host_hint),
         args.json,
     )
     return 0
@@ -146,6 +179,7 @@ def _archive_sources(
             session_id=session_id,
             agent_id=agent_id,
             operator_id=operator_id,
+            occurred_at=source.modified_at,
         )
         archived.append(
             {
@@ -169,7 +203,12 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         session_id = args.session
     else:
         session, _ = store.open_session(
-            agent_id, operator_id, workspace_key, title=args.title, host=host
+            agent_id,
+            operator_id,
+            workspace_key,
+            title=args.title,
+            host=host,
+            lane=_lane(args),
         )
         session_id = session.session_id
 
@@ -267,6 +306,39 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_present(args: argparse.Namespace) -> int:
+    from agentloom_runtime.session.present import DEFAULT_MODEL, present_transcript
+
+    transcript_id = args.id
+    if not transcript_id and args.ref:
+        recs = store.list_transcripts(source_ref=args.ref, limit=1)
+        if not recs:
+            recs = [
+                r
+                for r in store.list_transcripts(limit=500)
+                if r.source_ref.startswith(args.ref)
+            ]
+        if not recs:
+            print(f"no archived transcript with ref {args.ref}")
+            return 1
+        transcript_id = recs[0].transcript_id
+    if not transcript_id:
+        print("error: pass --id or --ref")
+        return 1
+    try:
+        stats = present_transcript(transcript_id, model=args.model or DEFAULT_MODEL)
+    except Exception as exc:
+        print(f"error: {exc}")
+        return 1
+    _emit(
+        stats,
+        f"presented {stats['source_ref'][:8]} with {stats['model']}: "
+        f"{stats['turns_en']} en / {stats['turns_es']} es turns",
+        args.json,
+    )
+    return 0
+
+
 def _embed_fn(batch_size: int = 64):
     from agentloom_runtime.memory.embedding_provider import embed_texts
 
@@ -358,7 +430,8 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def cmd_turn(args: argparse.Namespace) -> int:
     session_id = _resolve_session_id(args)
-    turn_id = store.add_turn(session_id, args.role, args.summary)
+    host = detect_host_context(Path(args.path) if args.path else None)
+    turn_id = store.add_turn(session_id, args.role, args.summary, host=host)
     _emit({"turn_id": turn_id, "session_id": session_id}, f"turn {turn_id} added", args.json)
     return 0
 
@@ -372,9 +445,11 @@ def cmd_list(args: argparse.Namespace) -> int:
         workspace_key=args.workspace,
         status=args.status,
         limit=args.limit,
+        lane=getattr(args, "lane", None),
     )
     text = "\n".join(
-        f"{s.updated_at}  {s.status:<7} {s.session_id}  {s.agent_id}  {s.workspace_key}"
+        f"{s.updated_at}  {s.status:<7} {s.lane:<12} {s.session_id}  {s.agent_id}  "
+        f"{s.workspace_key}"
         for s in sessions
     ) or "no sessions found"
     _emit([s.to_dict() for s in sessions], text, args.json)
@@ -496,7 +571,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(migrate.describe(states))
         return 0
 
-    actions = migrate.apply_migrations(group, baseline=args.baseline)
+    try:
+        actions = migrate.apply_migrations(
+            group, baseline=args.baseline, through=args.through
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
     applied = [name for name, action in actions if action != "skipped"]
     skipped = [name for name, action in actions if action == "skipped"]
 
@@ -509,6 +589,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"already applied: {len(skipped)}")
     if not applied:
         print("schema is up to date.")
+    if args.through:
+        print(f"stopped after {args.through}; later migrations remain pending.")
     return 0
 
 
@@ -663,6 +745,11 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", help=f"agent id (default: ${DEFAULT_AGENT_ENV})")
     parser.add_argument("--operator", help="operator id (default: $AGENTLOOM_OPERATOR_ID or OS user)")
     parser.add_argument("--workspace", help="workspace key override (default: normalized VCS remote)")
+    parser.add_argument(
+        "--lane",
+        help="concurrent work stream (default: $AGENTLOOM_SESSION_LANE or 'default'). "
+        "Two machines working different streams need different lanes.",
+    )
     parser.add_argument("--path", help="repository path (default: cwd)")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
@@ -684,6 +771,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fork-from", dest="fork_from", help="parent session id to fork from")
     p.add_argument("--checkpoint", help="checkpoint id to fork from (default: latest of parent)")
     p.add_argument("--reason", help="fork reason (e.g. host_switch, subtask_branch, continuation)")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="fork even though another machine is still active in the session "
+        "(this parks their session)",
+    )
     p.set_defaults(func=cmd_open)
 
     p = sub.add_parser("tree", help="show session DAG hierarchy for this workspace")
@@ -739,6 +832,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--format", choices=["text", "markdown", "json"], default="text"
     )
     p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser(
+        "present",
+        help="translate one archived transcript into English/Spanish overlays",
+    )
+    _add_common(p)
+    p.add_argument("--id", help="transcript id")
+    p.add_argument("--ref", help="source reference")
+    p.add_argument("--model", default=None, help="chat model (default: qwen3:32b)")
+    p.set_defaults(func=cmd_present)
 
     p = sub.add_parser("index", help="build the search index over archived conversations")
     _add_common(p)
@@ -802,6 +905,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline",
         action="store_true",
         help="record migrations as applied without executing them (adopt a hand-built database)",
+    )
+    p.add_argument(
+        "--through",
+        help="stop after this migration (filename prefix, e.g. '016'), for staging "
+        "an expand/contract rollout across hosts",
     )
     p.set_defaults(func=cmd_init)
 

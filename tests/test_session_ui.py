@@ -13,39 +13,71 @@ from unittest.mock import patch
 import pytest
 
 from agentloom_runtime.session.index import ArchiveHit
-from agentloom_runtime.session.store import SessionRecord
+from agentloom_runtime.session.store import SessionRecord, TranscriptRecord
 from agentloom_runtime.session.transcript import TranscriptBlock, TranscriptDocument, TranscriptTurn
 from agentloom_runtime.session.ui.server import HTML_TEMPLATE, SessionApiHandler, _int_param
 
 
 class DummyRequest:
-    def __init__(self, path: str):
+    def __init__(self, path: str, method: str = "GET", body: bytes = b""):
         self.path = path
+        self.method = method
+        self.body = body
 
     def makefile(self, *args, **kwargs):
         if "w" in args[0] or "wb" in args[0]:
             return io.BytesIO()
-        return io.BytesIO(f"GET {self.path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("utf-8"))
+        headers = f"{self.method} {self.path} HTTP/1.1\r\nHost: localhost\r\n"
+        if self.body:
+            headers += (
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(self.body)}\r\n"
+            )
+        return io.BytesIO(headers.encode("utf-8") + b"\r\n" + self.body)
 
 
-def _call_handler(path: str) -> tuple[int, dict, bytes]:
-    """Helper to simulate an HTTP GET request to SessionApiHandler."""
-    req = DummyRequest(path)
+def _call_handler(path: str, method: str = "GET", json_body: dict | None = None) -> bytes:
+    """Simulate one request to SessionApiHandler."""
+    body = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
+    req = DummyRequest(path, method=method, body=body)
     handler = SessionApiHandler.__new__(SessionApiHandler)
     handler.rfile = req.makefile("rb")
     handler.wfile = io.BytesIO()
     handler.raw_requestline = handler.rfile.readline()
     handler.parse_request()
     handler.path = path
-    handler.do_GET()
-    response_bytes = handler.wfile.getvalue()
-    return response_bytes
+    if method == "PATCH":
+        handler.do_PATCH()
+    else:
+        handler.do_GET()
+    return handler.wfile.getvalue()
 
 
 def test_ui_index_html_renders():
     assert "AgentLoom" in HTML_TEMPLATE
     assert "Session DAG" in HTML_TEMPLATE
     assert "Transcripts" in HTML_TEMPLATE
+    assert "saveTitle" in HTML_TEMPLATE
+    assert "/title" in HTML_TEMPLATE
+    assert "stripped at archive time" in HTML_TEMPLATE
+    assert "You renamed this conversation" in HTML_TEMPLATE
+    assert "showHoverTip" in HTML_TEMPLATE
+    assert "Paused, not finished" in HTML_TEMPLATE
+    assert "Not a filter on the Transcripts list" in HTML_TEMPLATE
+    assert "statusTip" in HTML_TEMPLATE
+    assert "unknown-host" in HTML_TEMPLATE
+    assert "/api/identity" in HTML_TEMPLATE
+    assert "open last on" in HTML_TEMPLATE
+    assert "checkpointHostTip" in HTML_TEMPLATE
+    assert "Append-only" in HTML_TEMPLATE
+    assert "marked.min.js" in HTML_TEMPLATE
+    assert "purify.min.js" in HTML_TEMPLATE
+    assert "renderMarkdown" in HTML_TEMPLATE
+    assert "setUiLocale" in HTML_TEMPLATE
+    assert ">Original<" in HTML_TEMPLATE
+    assert ">English<" in HTML_TEMPLATE
+    assert ">Spanish<" in HTML_TEMPLATE
+    assert 'v-html="renderMarkdown' in HTML_TEMPLATE
 
 
 def test_ui_api_workspaces():
@@ -78,6 +110,32 @@ def test_ui_api_workspaces():
         assert "github.com/acme/repo2" in data
 
 
+def test_ui_api_identity():
+    from agentloom_runtime.session.identity import HostContext
+
+    fake = HostContext(
+        host_hint="GISBG",
+        ide_hint="cursor",
+        workspace_path_hint=r"C:\projects\envistor-data",
+    )
+    with patch(
+        "agentloom_runtime.session.ui.server.detect_host_context",
+        autospec=True,
+        return_value=fake,
+    ), patch(
+        "agentloom_runtime.session.ui.server.detect_workspace_key",
+        autospec=True,
+        return_value="example.com/org/repo",
+    ):
+        resp_bytes = _call_handler("/api/identity")
+        assert b"200 OK" in resp_bytes
+        body = resp_bytes.split(b"\r\n\r\n", 1)[1]
+        data = json.loads(body)
+        assert data["host_hint"] == "GISBG"
+        assert data["ide_hint"] == "cursor"
+        assert data["workspace_key"] == "example.com/org/repo"
+
+
 def test_ui_api_sessions():
     tree = [{"session_id": "s-1", "children": []}]
     with patch(
@@ -101,6 +159,18 @@ def test_ui_api_transcript_detail():
     )
     with patch(
         "agentloom_runtime.session.store.load_transcript", autospec=True, return_value=doc
+    ), patch(
+        "agentloom_runtime.session.store.get_transcript_record",
+        autospec=True,
+        return_value=TranscriptRecord(
+            transcript_id="t-1",
+            session_id=None,
+            source_host="cursor",
+            source_ref="ref-123",
+            workspace_key="ws",
+            title="Renamed in the archive",
+            title_source="user",
+        ),
     ):
         resp_bytes = _call_handler("/api/transcripts/t-1")
         assert b"200 OK" in resp_bytes
@@ -108,6 +178,41 @@ def test_ui_api_transcript_detail():
         data = json.loads(body)
         assert data["source_ref"] == "ref-123"
         assert len(data["turns"]) == 1
+        assert data["title"] == "Renamed in the archive"
+        assert data["title_source"] == "user"
+        assert data["presentation"] is None
+
+
+def test_ui_api_transcript_detail_includes_presentation():
+    doc = TranscriptDocument(
+        source_host="cursor",
+        source_ref="ref-123",
+        turns=[TranscriptTurn(seq=1, role="human", blocks=[TranscriptBlock(type="text", text="hi")])],
+    )
+    pack = {
+        "title": {"original": "预算", "en": "Budget", "es": "Presupuesto"},
+        "description": {"en": "A short note."},
+    }
+    with patch(
+        "agentloom_runtime.session.store.load_transcript", autospec=True, return_value=doc
+    ), patch(
+        "agentloom_runtime.session.store.get_transcript_record",
+        autospec=True,
+        return_value=TranscriptRecord(
+            transcript_id="t-1",
+            session_id=None,
+            source_host="cursor",
+            source_ref="ref-123",
+            workspace_key="ws",
+            title="预算",
+            presentation=pack,
+        ),
+    ):
+        resp_bytes = _call_handler("/api/transcripts/t-1")
+        body = resp_bytes.split(b"\r\n\r\n", 1)[1]
+        data = json.loads(body)
+        assert data["presentation"]["title"]["en"] == "Budget"
+        assert data["presentation"]["description"]["en"] == "A short note."
 
 
 def _hit() -> ArchiveHit:
@@ -247,3 +352,52 @@ def test_viewer_search_can_be_forced_lexical():
 
     embed.assert_not_called()
     assert captured["query_vec"] is None
+
+
+def test_rename_transcript_uses_patch_and_does_not_touch_the_body():
+    captured: dict = {}
+
+    def fake_set(transcript_id, title):
+        captured["transcript_id"] = transcript_id
+        captured["title"] = title
+        return TranscriptRecord(
+            transcript_id=transcript_id,
+            session_id=None,
+            source_host="cursor",
+            source_ref="ref-123",
+            workspace_key="ws",
+            title="Cross-machine session sync",
+            title_source="user",
+        )
+
+    with patch(
+        "agentloom_runtime.session.store.set_transcript_title",
+        autospec=True,
+        side_effect=fake_set,
+    ):
+        resp = _call_handler(
+            "/api/transcripts/t-1/title",
+            method="PATCH",
+            json_body={"title": "Cross-machine session sync"},
+        )
+
+    assert b"200 OK" in resp
+    assert captured == {"transcript_id": "t-1", "title": "Cross-machine session sync"}
+    data = json.loads(resp.split(b"\r\n\r\n", 1)[1])
+    assert data["title"] == "Cross-machine session sync"
+    assert data["title_source"] == "user"
+
+
+def test_rename_missing_transcript_is_404():
+    with patch(
+        "agentloom_runtime.session.store.set_transcript_title",
+        autospec=True,
+        side_effect=KeyError("t-missing"),
+    ):
+        resp = _call_handler(
+            "/api/transcripts/t-missing/title",
+            method="PATCH",
+            json_body={"title": "nope"},
+        )
+    assert b"404" in resp.split(b"\r\n", 1)[0]
+

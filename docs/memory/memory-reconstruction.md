@@ -408,6 +408,13 @@ no symlinking editor application-data directories, no keying a session on an
 absolute checkout path, no filtering a resume lookup on a machine name, no
 requiring an editor extension for any operation.
 
+The same argument applies one layer down. Derived archive state — a translated
+turn, a listing title, a reviewer's score — is still Layer 0. If it lives in a
+file beside the checkout, switching machines drops it. Overlays go in
+`presentation_json`; locator rows are keyed by `locale`; batch progress and
+judgement go in `session_job_*`. The deployment-repo specification is
+`docs/architecture/memory/layer-0-archive-presentation-and-job-trace.md`.
+
 ---
 
 ## Related

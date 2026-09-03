@@ -14,7 +14,11 @@ from unittest.mock import patch
 import pytest
 
 from agentloom_runtime.session import store
-from agentloom_runtime.session.identity import HostContext, normalize_workspace_key
+from agentloom_runtime.session.identity import (
+    HostContext,
+    normalize_workspace_key,
+    resolve_lane,
+)
 from agentloom_runtime.session.store import ResumePack, SessionRecord, render_resume_pack
 from agentloom_runtime.session.vcs import _summarize_status
 
@@ -165,7 +169,7 @@ def test_reindex_tests_for_a_vector_rather_than_selecting_it():
     """
     source = (SESSION_PKG / "store.py").read_text(encoding="utf-8")
     reindex_query = re.search(
-        r"SELECT chunk_id, granularity.*?FROM session_transcript_chunks",
+        r"SELECT chunk_id, locale, granularity.*?FROM session_transcript_chunks",
         source,
         re.DOTALL,
     )
@@ -299,6 +303,38 @@ def test_missing_session_renders_a_usable_message():
     assert "Starting fresh" in render_resume_pack(None)
 
 
+def test_resume_on_another_machine_stops_and_asks():
+    text = render_resume_pack(_pack(), current_host="laptop-b")
+    assert "HOST SWITCH" in text
+    assert "laptop-a" in text and "laptop-b" in text
+    assert "--reason host_switch" in text
+    assert "Do not choose for them." in text
+    # The banner must precede the pack, or an agent skimming the head misses it.
+    assert text.index("HOST SWITCH") < text.index("NEXT ACTION:")
+
+
+def test_resume_on_the_same_machine_is_unchanged():
+    assert "HOST SWITCH" not in render_resume_pack(_pack(), current_host="laptop-a")
+
+
+def test_resume_without_a_current_host_does_not_guess():
+    assert "HOST SWITCH" not in render_resume_pack(_pack())
+
+
+def test_host_switch_detection_needs_a_checkpoint():
+    pack = _pack()
+    pack.checkpoint = None
+    assert store.detect_host_switch(pack, "laptop-b") is None
+    assert store.detect_host_switch(None, "laptop-b") is None
+
+
+def test_host_switch_reports_the_fork_target():
+    switch = store.detect_host_switch(_pack(), "laptop-b")
+    assert switch["session_id"] == "s-1"
+    assert switch["checkpoint_host"] == "laptop-a"
+    assert switch["current_host"] == "laptop-b"
+
+
 def test_host_context_is_only_provenance():
     host = HostContext(host_hint="h", ide_hint="i", workspace_path_hint="p")
     assert (host.host_hint, host.ide_hint, host.workspace_path_hint) == ("h", "i", "p")
@@ -324,6 +360,176 @@ def test_session_record_supports_dag_lineage_fields():
     assert from_d.parent_session_id == "s-parent"
     assert from_d.fork_checkpoint_id == "cp-123"
     assert from_d.fork_reason == "host_switch"
+
+
+# --------------------------------------------------------------------------
+# lanes — concurrent work streams in one repository
+# --------------------------------------------------------------------------
+
+
+def test_lane_defaults_to_the_shared_lane(monkeypatch):
+    """Every session that predates lanes lives in 'default'.
+
+    A host that never passes a lane has to keep resuming exactly what it
+    resumed before, or this becomes a breaking change for every deployment.
+    """
+    monkeypatch.delenv("AGENTLOOM_SESSION_LANE", raising=False)
+    assert resolve_lane() == "default"
+    assert resolve_lane("  ") == "default"
+
+
+def test_lane_can_be_pinned_per_checkout(monkeypatch):
+    monkeypatch.setenv("AGENTLOOM_SESSION_LANE", "medialoom")
+    assert resolve_lane() == "medialoom"
+    assert resolve_lane("explicit") == "explicit", "an explicit lane outranks the environment"
+
+
+def test_open_session_lookup_keys_only_on_identity_and_lane():
+    """The positive form of the host-neutrality invariant.
+
+    The name-based prohibition elsewhere catches a hint reaching a predicate.
+    This catches the other direction: that the lookup keys on the whole
+    identity and nothing else, so a second machine resolves the same session.
+    """
+    import inspect
+
+    source = inspect.getsource(store._find_open)
+    where = source[source.index("WHERE") : source.index("LIMIT")]
+    predicates = set(re.findall(r"(\w+)\s*=\s*[?']", where))
+    assert predicates == {"agent_id", "operator_id", "workspace_key", "lane", "status"}
+
+
+def test_session_record_defaults_to_the_shared_lane():
+    rec = SessionRecord(
+        session_id="s-1",
+        agent_id="a",
+        operator_id="o",
+        workspace_key="github.com/acme/widget",
+        status="open",
+    )
+    assert rec.lane == "default"
+    assert SessionRecord.from_row(rec.to_dict()).lane == "default"
+
+
+def test_session_record_reads_a_row_written_before_lanes_existed():
+    """016 backfills every row, but hand-built rows and older callers do not."""
+    row = {
+        "session_id": "s-1",
+        "agent_id": "a",
+        "operator_id": "o",
+        "workspace_key": "github.com/acme/widget",
+        "status": "open",
+        "title": None,
+        "workspace_path_hint": None,
+        "host_hint": None,
+        "ide_hint": None,
+        "created_at": None,
+        "updated_at": None,
+        "last_checkpoint_at": None,
+    }
+    assert SessionRecord.from_row(row).lane == "default"
+
+
+def test_resume_pack_shows_the_lane():
+    assert "lane:      default" in render_resume_pack(_pack())
+
+
+# --------------------------------------------------------------------------
+# concurrent hosts — the case a hostname comparison alone cannot see
+# --------------------------------------------------------------------------
+
+
+def _busy_pack() -> ResumePack:
+    pack = _pack()
+    pack.live_hosts = [
+        {
+            "host": "laptop-a",
+            "ide": "cursor",
+            "first_seen_at": "2026-08-14T00:00:00",
+            "last_seen_at": "2026-08-14T00:31:00",
+        }
+    ]
+    return pack
+
+
+def test_a_live_second_machine_is_contention_not_a_handoff():
+    """The distinction the whole guard rests on.
+
+    Same two hostnames either way. Only recent activity separates "they left,
+    take over" from "they are typing, do not park them".
+    """
+    assert store.detect_host_switch(_pack(), "laptop-b")["kind"] == "handoff"
+    assert store.detect_host_switch(_busy_pack(), "laptop-b")["kind"] == "contention"
+
+
+def test_contention_banner_refuses_the_fork_and_offers_a_lane():
+    text = render_resume_pack(_busy_pack(), current_host="laptop-b")
+    assert "ANOTHER MACHINE IS WORKING HERE" in text
+    assert "HOST SWITCH" not in text, "the handoff advice would park a live session"
+    assert "--lane" in text
+    assert "Do not do it." in text
+    assert "--force" in text, "taking over must stay possible, just never silent"
+    assert text.index("ANOTHER MACHINE") < text.index("NEXT ACTION:")
+
+
+def test_our_own_heartbeat_is_not_company():
+    """A host that only ever sees itself in session_hosts must not be warned."""
+    pack = _pack()
+    pack.live_hosts = [{"host": "laptop-a", "ide": "cursor", "last_seen_at": "x"}]
+    assert store.detect_host_switch(pack, "laptop-a") is None
+
+
+def test_contention_is_reported_even_without_a_checkpoint():
+    """Liveness does not depend on anyone having checkpointed yet.
+
+    A machine that opened a session an hour ago and has not checkpointed is
+    still working there; requiring a checkpoint would hide exactly that case.
+    """
+    pack = _busy_pack()
+    pack.checkpoint = None
+    switch = store.detect_host_switch(pack, "laptop-b")
+    assert switch["kind"] == "contention"
+    assert switch["live_hosts"][0]["host"] == "laptop-a"
+
+
+def test_live_window_is_generous_and_overridable(monkeypatch):
+    """Erring toward "still live" costs a spare lane; erring the other way
+    parks somebody's session. The default reflects that asymmetry."""
+    monkeypatch.delenv("AGENTLOOM_SESSION_LIVE_MINUTES", raising=False)
+    assert store._live_window_minutes() >= 60
+    monkeypatch.setenv("AGENTLOOM_SESSION_LIVE_MINUTES", "15")
+    assert store._live_window_minutes() == 15
+    monkeypatch.setenv("AGENTLOOM_SESSION_LIVE_MINUTES", "not-a-number")
+    assert store._live_window_minutes() == store.DEFAULT_LIVE_WINDOW_MINUTES
+
+
+def test_the_fork_guard_does_not_depend_on_the_other_host_being_upgraded():
+    """The guard's floor is data every release writes.
+
+    `session_hosts` only fills up once a host runs lane-aware code, so during a
+    rollout the heartbeat is empty for exactly the machine most at risk of
+    being parked. The guard has to fall back to the session row, which every
+    version of the client updates.
+    """
+    import inspect
+
+    source = inspect.getsource(store.open_session)
+    guard = source[source.index("if not force:") : source.index("raise SessionInUseError")]
+    assert "_live_hosts" in guard
+    assert "_implied_activity" in guard, "no fallback: an un-upgraded host is invisible"
+
+    implied = inspect.getsource(store._implied_activity)
+    assert "host_hint" in implied and "last_checkpoint_at" in implied
+    assert "agent_sessions" in implied
+
+
+def test_session_in_use_error_names_the_machine_to_ask_about():
+    exc = store.SessionInUseError(
+        "s-1", [{"host": "fiu-gis-center", "last_seen_at": "2026-09-02T19:29:09"}]
+    )
+    assert "fiu-gis-center" in str(exc)
+    assert "s-1" in str(exc)
+    assert exc.hosts[0]["host"] == "fiu-gis-center"
 
 
 def test_cli_render_tree_node():

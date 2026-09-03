@@ -7,6 +7,7 @@ import struct
 import pytest
 
 from agentloom_runtime.session.index import (
+    apply_turn_overlay,
     chunk_document,
     decode_vector,
     encode_vector,
@@ -34,6 +35,29 @@ def _turn(seq: int, role: str, text: str | None = None, tool: str | None = None)
 
 def _doc(*turns: TranscriptTurn) -> TranscriptDocument:
     return TranscriptDocument(source_host="cursor", source_ref="abc", turns=list(turns))
+
+
+def test_apply_turn_overlay_replaces_text_and_keeps_tools():
+    doc = _doc(
+        _turn(1, "human", "来"),
+        _turn(2, "agent", "好", tool="Read"),
+    )
+    out = apply_turn_overlay(doc, {"1": ["Come"], "2": ["OK"]})
+    assert out.turns[0].text == "Come"
+    assert out.turns[1].text == "OK"
+    assert out.turns[1].blocks[1].tool_name == "Read"
+
+
+def test_session_chunk_heading_is_searchable_listing_copy():
+    chunks = chunk_document(
+        _doc(_turn(1, "human", "hello there friends")),
+        heading="Presupuesto de API de modelos frontier",
+        locale="es",
+    )
+    session = next(c for c in chunks if c.granularity == "session")
+    assert session.locale == "es"
+    assert "Presupuesto de API" in session.content
+    assert "hello there friends" in session.content
 
 
 def test_prose_turns_drop_tool_only_noise():
@@ -85,6 +109,29 @@ def test_lexical_rank_prefers_the_matching_chunk():
     )
     assert ranked[0][0] == "a"
     assert ranked[0][1] > 0
+
+
+def test_hybrid_rank_spanish_query_prefers_spanish_overlay_window():
+    """Cross-language retrieval is why overlays are indexed, not just displayed."""
+    items = [
+        {
+            "id": "orig",
+            "transcript_id": "t1",
+            "granularity": "window",
+            "locale": "original",
+            "content": "FIU Libraries frontier model API budget of seven thousand six hundred dollars",
+        },
+        {
+            "id": "es",
+            "transcript_id": "t1",
+            "granularity": "window",
+            "locale": "es",
+            "content": "Presupuesto de API de modelos frontier para las bibliotecas de FIU, siete mil seiscientos dolares",
+        },
+    ]
+    ranked = hybrid_rank("presupuesto bibliotecas frontier", items, limit=8)
+    assert ranked[0]["id"] == "es"
+    assert ranked[0]["locale"] == "es"
 
 
 def test_vector_rank_uses_cosine():

@@ -5,13 +5,18 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
-from typing import Iterable
+from typing import Any, Iterable
 
 from agentloom_runtime.config import load_env
 
 logger = logging.getLogger("agentloom-runtime.memory.embedding")
 
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+# text-embedding-3-small rejects a request over 300k tokens. One 929-turn
+# trilingual transcript was 425k in a single call. Stay well under, including
+# CJK where chars ≈ tokens.
+MAX_EMBED_INPUTS = 128
+MAX_EMBED_CHARS = 80_000
 
 
 def get_embedding_model() -> str:
@@ -49,7 +54,24 @@ def embed_texts(texts: Iterable[str], model: str | None = None) -> list[list[flo
     if client is None:
         raise RuntimeError("OPENAI_API_KEY missing or OpenAI client unavailable")
 
-    response = client.embeddings.create(model=model or get_embedding_model(), input=clean_texts)
+    model_name = model or get_embedding_model()
+    vectors: list[list[float]] = []
+    batch: list[str] = []
+    chars = 0
+    for text in clean_texts:
+        n = len(text)
+        if batch and (len(batch) >= MAX_EMBED_INPUTS or chars + n > MAX_EMBED_CHARS):
+            vectors.extend(_embed_batch(client, model_name, batch))
+            batch, chars = [], 0
+        batch.append(text)
+        chars += n
+    if batch:
+        vectors.extend(_embed_batch(client, model_name, batch))
+    return vectors
+
+
+def _embed_batch(client: Any, model: str, batch: list[str]) -> list[list[float]]:
+    response = client.embeddings.create(model=model, input=batch)
     return [item.embedding for item in response.data]
 
 

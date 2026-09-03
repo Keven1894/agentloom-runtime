@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agentloom_runtime.session import store
-from agentloom_runtime.session.identity import detect_workspace_key, resolve_operator_id
+from agentloom_runtime.session.identity import (
+    detect_host_context,
+    detect_workspace_key,
+    resolve_lane,
+    resolve_operator_id,
+)
 from agentloom_runtime.session.transcript import render_markdown, render_text
 
 SERVER_NAME = "agentloom-session"
@@ -116,6 +121,14 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Workspace key (defaults to current repository).",
                 },
+                "lane": {
+                    "type": "string",
+                    "description": (
+                        "Concurrent work stream within the workspace (defaults to "
+                        "AGENTLOOM_SESSION_LANE or 'default'). Machines working "
+                        "different streams at the same time use different lanes."
+                    ),
+                },
             },
         },
     },
@@ -148,6 +161,13 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Workspace key (defaults to current repository).",
                 },
+                "lane": {
+                    "type": "string",
+                    "description": (
+                        "Concurrent work stream within the workspace (defaults to "
+                        "AGENTLOOM_SESSION_LANE or 'default')."
+                    ),
+                },
             },
         },
     },
@@ -178,6 +198,15 @@ def _resolve_identity(arguments: dict[str, Any]) -> tuple[str, str, str]:
         )
     operator_id = resolve_operator_id(arguments.get("operator_id"))
     return agent_id, operator_id, _resolve_workspace(arguments.get("workspace_key"))
+
+
+def _resolve_lane(arguments: dict[str, Any]) -> str:
+    """Resolve the lane a tool call acts on.
+
+    Falls through to the same environment variable the CLI reads, so a checkout
+    pinned to one lane answers consistently no matter which surface asks.
+    """
+    return resolve_lane(arguments.get("lane"))
 
 
 def tool_session_search(arguments: dict[str, Any]) -> str:
@@ -285,11 +314,18 @@ def tool_session_get_checkpoint(arguments: dict[str, Any]) -> str:
     except ValueError as exc:
         return f"Error: {exc}"
 
-    pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=5)
+    host = detect_host_context()
+    lane = _resolve_lane(arguments)
+    pack = store.resume(
+        agent_id, operator_id, workspace_key, turn_limit=5, lane=lane, host=host
+    )
     if pack is None:
-        return f"No active or parked session found for ({agent_id}, {operator_id}, {workspace_key})."
+        return (
+            f"No active or parked session found for ({agent_id}, {operator_id}, "
+            f"{workspace_key}) in lane '{lane}'."
+        )
 
-    return store.render_resume_pack(pack)
+    return store.render_resume_pack(pack, current_host=host.host_hint)
 
 
 def tool_session_get_lineage(arguments: dict[str, Any]) -> str:
@@ -301,7 +337,9 @@ def tool_session_get_lineage(arguments: dict[str, Any]) -> str:
             agent_id, operator_id, workspace_key = _resolve_identity(arguments)
         except ValueError as exc:
             return f"Error: {exc}"
-        pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=0)
+        pack = store.resume(
+            agent_id, operator_id, workspace_key, turn_limit=0, lane=_resolve_lane(arguments)
+        )
         if pack is None:
             return (
                 f"No session found for ({agent_id}, {operator_id}, {workspace_key}). "

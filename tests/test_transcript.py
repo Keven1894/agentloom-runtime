@@ -456,3 +456,62 @@ def test_transcript_document_title_derivation():
     doc3 = TranscriptDocument(source_host="cursor", source_ref="abc-12345678", turns=[])
     assert doc3.title == "abc-1234"
 
+
+def test_user_title_survives_the_next_archive_write():
+    from agentloom_runtime.session.store import next_archive_title
+
+    assert next_archive_title("first sentence", "My name", "user") == ("My name", "user")
+    assert next_archive_title("first sentence", "old derived", "derived") == (
+        "first sentence",
+        "derived",
+    )
+    assert next_archive_title("first sentence", None, None) == ("first sentence", "derived")
+
+
+def test_empty_title_normalizes_to_reset():
+    from agentloom_runtime.session.store import normalize_transcript_title
+
+    assert normalize_transcript_title("  Cross-machine session sync  ") == "Cross-machine session sync"
+    assert normalize_transcript_title("   ") is None
+    assert normalize_transcript_title("x" * 300) == "x" * 255
+
+
+def test_normalize_presentation_keeps_locales_and_turns():
+    from agentloom_runtime.session.store import normalize_presentation
+
+    pack = normalize_presentation(
+        {
+            "title": {"original": "  预算  ", "en": "Budget", "es": "Presupuesto", "fr": "drop"},
+            "description": {"en": "A short note."},
+            "turns": {
+                "en": {"1": ["Hello"], "2": ["Tool stays original"]},
+                "es": {"1": ["Hola"]},
+                "de": {"1": ["ignored"]},
+            },
+        }
+    )
+    assert pack["title"] == {"original": "预算", "en": "Budget", "es": "Presupuesto"}
+    assert pack["description"] == {"en": "A short note."}
+    assert pack["turns"]["en"]["1"] == ["Hello"]
+    assert "de" not in pack["turns"]
+
+
+def test_normalize_presentation_rejects_empty():
+    from agentloom_runtime.session.store import normalize_presentation
+
+    with pytest.raises(ValueError):
+        normalize_presentation({})
+
+
+def test_host_mtime_becomes_naive_local_datetime():
+    from datetime import datetime
+
+    from agentloom_runtime.session.store import as_naive_datetime
+
+    ts = datetime(2026, 8, 25, 15, 48, 33).timestamp()
+    got = as_naive_datetime(ts)
+    assert got is not None
+    assert got.year == 2026 and got.month == 8 and got.day == 25
+    assert as_naive_datetime(None) is None
+
+

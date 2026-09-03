@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Optional
 
 from agentloom_runtime.memory.joint_retrieval import DEFAULT_RRF_K, reciprocal_rank_fusion
@@ -42,6 +42,7 @@ __all__ = [
     "WINDOW_STRIDE",
     "ArchiveHit",
     "TranscriptChunk",
+    "apply_turn_overlay",
     "chunk_document",
     "decode_vector",
     "encode_vector",
@@ -75,6 +76,7 @@ class TranscriptChunk:
     seq_end: int
     content: str
     content_sha256: str = ""
+    locale: str = "original"
 
     def __post_init__(self) -> None:
         if not self.content_sha256:
@@ -99,6 +101,7 @@ class ArchiveHit:
     snippet: str
     search_mode: str
     content: str = field(repr=False, default="")
+    locale: str = "original"
 
     @property
     def seq(self) -> int:
@@ -128,11 +131,40 @@ def _clip(text: str, limit: int = MAX_CONTENT_CHARS) -> str:
     return text[:limit] + "…"
 
 
+def apply_turn_overlay(
+    doc: TranscriptDocument, overlay: dict[str, list[str]]
+) -> TranscriptDocument:
+    """Return a copy whose text blocks are replaced from a locale overlay.
+
+    Missing seqs keep the original prose so a partial translation is still
+    searchable as one conversation, not a hole.
+    """
+    new_turns: list[TranscriptTurn] = []
+    for turn in doc.turns:
+        texts = overlay.get(str(turn.seq))
+        if not texts:
+            new_turns.append(turn)
+            continue
+        text_i = 0
+        new_blocks = []
+        for block in turn.blocks:
+            if block.type == "text" and block.text:
+                new_text = texts[text_i] if text_i < len(texts) else block.text
+                text_i += 1
+                new_blocks.append(replace(block, text=new_text))
+            else:
+                new_blocks.append(block)
+        new_turns.append(replace(turn, blocks=new_blocks))
+    return replace(doc, turns=new_turns)
+
+
 def chunk_document(
     doc: TranscriptDocument,
     *,
     window_size: int = WINDOW_SIZE,
     stride: int = WINDOW_STRIDE,
+    heading: Optional[str] = None,
+    locale: str = "original",
 ) -> list[TranscriptChunk]:
     """Build the session node plus overlapping prose windows.
 
@@ -146,6 +178,8 @@ def chunk_document(
 
     chunks: list[TranscriptChunk] = []
     session_text = _clip("\n\n".join(_format_turn(t) for t in prose))
+    if heading and heading.strip():
+        session_text = _clip(heading.strip() + "\n\n" + session_text)
     if len(session_text) >= MIN_PROSE_CHARS:
         chunks.append(
             TranscriptChunk(
@@ -153,6 +187,7 @@ def chunk_document(
                 seq_start=prose[0].seq,
                 seq_end=prose[-1].seq,
                 content=session_text,
+                locale=locale,
             )
         )
 
@@ -181,6 +216,7 @@ def chunk_document(
                 seq_start=seq_start,
                 seq_end=seq_end,
                 content=text,
+                locale=locale,
             )
         )
     return chunks

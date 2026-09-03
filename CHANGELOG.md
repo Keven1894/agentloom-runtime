@@ -4,6 +4,63 @@
 
 ### Added
 
+- **Lanes** — two machines can work in one repository at the same time. Session
+  identity was `(agent, operator, workspace)`, with a generated `open_key`
+  enforcing one open session per identity. That is correct for a handoff, and
+  it was the only way this layer had ever been used: in the reference
+  deployment every session carries `fork_reason = host_switch`, forming one
+  linear chain across four machines. It has no room for concurrent work — the
+  second machine cannot get a slot, and `open --fork-from` parks the first
+  machine's live session to make one.
+
+  The missing dimension is the work stream, not the machine. Keying on the host
+  would buy concurrency by destroying the reason the layer exists, since a
+  session has to stay resumable from anywhere; a lane names *what* is being
+  worked on, so any host can still resume any lane. Lanes default to `default`,
+  so a host that never passes one resumes exactly what it resumed before.
+
+- Forking refuses to park a session another machine is still using
+  (`SessionInUseError`), which is the failure this was built to stop rather
+  than merely warn about. `--force` still takes the thread over, and a
+  different lane sidesteps the collision entirely.
+
+  `session_hosts` (016) records which machines are active in a session. The
+  guard does not trust it alone: that table is only written by lane-aware code,
+  so during a rollout the machine most at risk of being parked is precisely the
+  one that has not been upgraded yet. It falls back to the session row's own
+  `host_hint` and timestamps, which every release writes.
+
+- The resume banner distinguishes the two situations a hostname comparison
+  alone cannot tell apart. A stale other host is a **handoff** and forking is
+  right. A host active inside the liveness window is **contention**, where the
+  answer is a separate lane and forking is what must not happen.
+  `AGENTLOOM_SESSION_LIVE_MINUTES` tunes the window; it defaults generously,
+  because calling a finished host live costs a spare lane while calling a
+  working host gone costs someone's session.
+
+- `agentloom-session init --through <prefix>` stops after a named migration, so
+  an expand/contract rollout can stage its halves. Lanes ship that way: 016 adds
+  the column and the activity table without touching `open_key`, leaving an
+  un-upgraded host seeing exactly one open session; 017 folds the lane into the
+  key and must wait until every host resolves sessions with a lane filter.
+  Opening a lane against a database still on 016 says so, instead of surfacing a
+  duplicate-key error about a generated column.
+
+- Transcript titles can be renamed in the Layer 0 viewer. The name lives in
+  the archive (`session_transcripts.title`) rather than in Cursor's private
+  chat store, so it survives re-archive, another machine, and another IDE.
+  Clearing the field restores the derived opening-prompt title.
+  `011_session_transcript_title_source.sql` is the lock: `title_source = user`
+  is what stops the next `archive` from putting the first sentence back.
+
+- Listing dates are the host file's last-write time, not the ingest. A bulk
+  archive on 2026-08-22 stamped 99 conversations with the same second because
+  `captured_at` had `ON UPDATE CURRENT_TIMESTAMP` and INSERT used now().
+  Cursor's JSONL has no timestamps; the reader already has the file mtime.
+  `012` drops the MySQL trigger; `archive` writes that mtime even when the
+  body hash is unchanged, so existing rows can be backfilled without rewriting
+  the blobs.
+
 - **`agentloom_runtime.session`** — Layer 0 working-session memory. An agent and
   operator resume work on a repository from a different machine or a different
   IDE, because session identity comes from the VCS remote rather than from a

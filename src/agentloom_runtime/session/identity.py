@@ -1,11 +1,19 @@
 """Host-agnostic session identity.
 
-A working session is identified by ``(agent_id, operator_id, workspace_key)``.
+A working session is identified by
+``(agent_id, operator_id, workspace_key, lane)``.
 
 ``workspace_key`` is derived from the repository's VCS remote, never from the
 local filesystem path, the machine name, or the editor. That is what allows the
 same session to be resumed from a different machine, a different checkout
 directory, or a different IDE.
+
+``lane`` names a concurrent stream of work inside that repository. It exists
+because host-agnostic identity, on its own, gives continuity by forbidding
+concurrency: two machines working at once cannot both hold the single open
+slot. A lane is deliberately *not* a machine label — keying on the host would
+buy concurrency by destroying the reason this layer exists. Naming the work
+instead means any host can still resume any lane.
 
 Everything in :class:`HostContext` is *provenance only*. It is recorded on
 sessions and checkpoints so a human can see where work happened, and it must
@@ -23,12 +31,16 @@ from pathlib import Path
 from typing import Optional
 
 __all__ = [
+    "DEFAULT_LANE",
     "HostContext",
     "detect_host_context",
     "detect_workspace_key",
     "normalize_workspace_key",
+    "resolve_lane",
     "resolve_operator_id",
 ]
+
+DEFAULT_LANE = "default"
 
 _SCP_LIKE = re.compile(r"^(?P<user>[^@/]+)@(?P<host>[^:/]+):(?P<path>.+)$")
 _SCHEME = re.compile(r"^(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*)://")
@@ -131,6 +143,23 @@ def resolve_operator_id(explicit: Optional[str] = None) -> str:
         if value and value.strip():
             return value.strip()
     return "unknown"
+
+
+def resolve_lane(explicit: Optional[str] = None) -> str:
+    """Resolve the work stream, defaulting to the single shared lane.
+
+    Defaulting to ``default`` rather than to something host-derived is what
+    keeps this backward compatible: every session that existed before lanes
+    sits in ``default``, and a host that never passes a lane keeps resuming
+    exactly what it resumed before.
+
+    ``AGENTLOOM_SESSION_LANE`` lets a checkout pin its lane once instead of
+    passing the flag on every command.
+    """
+    for candidate in (explicit, os.environ.get("AGENTLOOM_SESSION_LANE")):
+        if candidate and candidate.strip():
+            return candidate.strip()[:64]
+    return DEFAULT_LANE
 
 
 @dataclass(frozen=True)
