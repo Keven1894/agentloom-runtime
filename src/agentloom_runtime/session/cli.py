@@ -140,6 +140,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         turn_limit=args.turns,
         lane=_lane(args),
         host=host,
+        peek=getattr(args, "peek", False),
     )
 
     payload = pack.to_dict() if pack else None
@@ -461,6 +462,55 @@ def cmd_park(args: argparse.Namespace) -> int:
     session_id = _resolve_session_id(args)
     ok = store.park_session(session_id)
     _emit({"session_id": session_id, "parked": ok}, f"parked {session_id}", args.json)
+    return 0
+
+
+def cmd_checkpoints(args: argparse.Namespace) -> int:
+    session_id = _resolve_session_id(args)
+    rows = store.list_checkpoints(session_id, limit=args.limit)
+    lines = []
+    for cp in rows:
+        origin = " / ".join(
+            x for x in (cp.get("host_hint"), cp.get("ide_hint")) if x
+        )
+        lines.append(f"{cp['created_at']}  {origin or '?'}")
+        if cp.get("next_action"):
+            lines.append(f"  next: {cp['next_action']}")
+        if cp.get("open_plan_path"):
+            lines.append(f"  plan: {cp['open_plan_path']}")
+        for item in cp.get("decisions") or []:
+            lines.append(f"  - {item}")
+    _emit(rows, "\n".join(lines) or "No checkpoints recorded yet.", args.json)
+    return 0
+
+
+def cmd_decisions(args: argparse.Namespace) -> int:
+    session_id = _resolve_session_id(args)
+    rows = store.list_decisions(
+        session_id, limit=args.limit, include_lineage=args.lineage
+    )
+    lines = [
+        f"{(item['created_at'] or '')[:10]}  {str(item['session_id'])[:8]}..  "
+        f"{item['decision']}"
+        for item in rows
+    ]
+    _emit(rows, "\n".join(lines) or "No decisions recorded yet.", args.json)
+    return 0
+
+
+def cmd_title(args: argparse.Namespace) -> int:
+    session_id = _resolve_session_id(args)
+    try:
+        record = store.set_session_title(session_id, args.text)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    if record is None:
+        raise SystemExit(f"error: no session {session_id}")
+    _emit(
+        record.to_dict(),
+        f"{session_id}\n  title: {record.title}",
+        args.json,
+    )
     return 0
 
 
@@ -792,6 +842,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("resume", help="print the resume pack for this identity")
     _add_common(p)
     p.add_argument("--turns", type=int, default=10, help="recent turn summaries to include")
+    p.add_argument(
+        "--peek",
+        action="store_true",
+        help="read without recording this machine as active in the session",
+    )
     p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("checkpoint", help="record a resume point")
@@ -883,6 +938,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", choices=["open", "parked", "closed"])
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("checkpoints", help="list a session's checkpoints")
+    _add_common(p)
+    p.add_argument("--session", help="explicit session id")
+    p.add_argument("--limit", type=int, default=10)
+    p.set_defaults(func=cmd_checkpoints)
+
+    p = sub.add_parser("decisions", help="list decisions recorded in checkpoints")
+    _add_common(p)
+    p.add_argument("--session", help="explicit session id")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument(
+        "--lineage",
+        action="store_true",
+        help="include the sessions this one was forked from",
+    )
+    p.set_defaults(func=cmd_decisions)
+
+    p = sub.add_parser("title", help="rename a session")
+    _add_common(p)
+    p.add_argument("text", help="the new title")
+    p.add_argument("--session", help="explicit session id")
+    p.set_defaults(func=cmd_title)
 
     p = sub.add_parser("park", help="pause a session")
     _add_common(p)

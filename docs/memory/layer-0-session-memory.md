@@ -137,10 +137,15 @@ export AGENTLOOM_AGENT_ID=my-builder
 export AGENTLOOM_DB_HOST=… AGENTLOOM_DB_NAME=… AGENTLOOM_DB_USER=… AGENTLOOM_DB_PASSWORD=…
 
 agentloom-session whoami       # show resolved identity (debug host neutrality)
-agentloom-session resume       # print the resume pack
+agentloom-session resume       # print the resume pack, and claim this lane
+agentloom-session resume --peek  # the same, without recording this host as active
 agentloom-session checkpoint --next "Apply the migration to dev" --plan docs/plan/x.md
 agentloom-session list         # every session for this identity, with lane and status
 agentloom-session park         # pause; frees this lane's open slot
+agentloom-session title "…"    # correct a session title that no longer describes the work
+
+agentloom-session decisions --lineage   # decisions under the newest checkpoint, across the fork chain
+agentloom-session checkpoints  # the checkpoint history, not just the latest
 
 agentloom-session open --lane medialoom --title "…"            # a second concurrent work stream
 agentloom-session open --fork-from <id> --reason host_switch   # branch session into DAG

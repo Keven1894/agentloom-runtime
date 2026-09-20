@@ -57,6 +57,7 @@ __all__ = [
     "count_transcripts",
     "index_workspace",
     "list_checkpoints",
+    "list_decisions",
     "list_transcripts",
     "load_transcript",
     "get_transcript_record",
@@ -65,8 +66,10 @@ __all__ = [
     "normalize_presentation",
     "open_session",
     "park_session",
+    "render_other_lanes",
     "render_resume_pack",
     "resume",
+    "set_session_title",
     "search_archive",
     "search_sessions",
     "store_transcript",
@@ -80,6 +83,12 @@ CHECKPOINT_SCHEMA_VERSION = 1
 # "gone" invites the fork that parks it. So the window is generous, and there
 # is an explicit override for the case it gets wrong.
 DEFAULT_LIVE_WINDOW_MINUTES = 240
+
+# Hours of silence after which an open lane is probably finished work that
+# nobody parked. Far longer than the liveness window, because these answer
+# different questions: liveness asks "is someone working right now", this asks
+# "did you walk away from this in a previous week".
+DEFAULT_STALE_LANE_HOURS = 72
 
 _SESSION_COLUMNS = (
     "session_id, agent_id, operator_id, workspace_key, lane, parent_session_id, "
@@ -149,6 +158,19 @@ def _live_window_minutes() -> int:
         except ValueError:
             pass
     return DEFAULT_LIVE_WINDOW_MINUTES
+
+
+def _stale_lane_hours() -> int:
+    """Hours of silence after which an open lane is worth asking about."""
+    import os
+
+    raw = os.environ.get("AGENTLOOM_SESSION_STALE_LANE_HOURS")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_STALE_LANE_HOURS
 
 
 class SessionOpenError(RuntimeError):
@@ -237,6 +259,10 @@ class ResumePack:
     # Other machines currently active in this session. Advisory: it changes
     # what the operator is asked, never which session was found.
     live_hosts: list[dict[str, Any]] = field(default_factory=list)
+    # This identity's other open lanes. Also advisory, and for the opposite
+    # reason: nothing expires a session, so a lane somebody finished with stays
+    # open and keeps its slot until a human parks it.
+    other_lanes: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -244,6 +270,7 @@ class ResumePack:
             "checkpoint": self.checkpoint,
             "turns": self.turns,
             "live_hosts": self.live_hosts,
+            "other_lanes": self.other_lanes,
         }
 
 
@@ -323,6 +350,54 @@ def _live_hosts(
         [session_id],
     ).fetchall()
     return [_host_row(r) for r in rows if not exclude_host or r["host"] != exclude_host]
+
+
+def _other_open_lanes(
+    conn: Any,
+    agent_id: str,
+    operator_id: str,
+    workspace_key: str,
+    exclude_lane: str,
+) -> list[dict[str, Any]]:
+    """This identity's open sessions in other lanes, oldest activity first.
+
+    A lane is created by whoever needs one and closed by nobody: nothing
+    expires an open session, so a work stream that was finished and walked away
+    from keeps its slot and goes on looking live to the next machine. Resume is
+    the one moment somebody is certainly reading, which makes it the only place
+    this can be said where it will be heard.
+
+    Advisory in the same sense as ``live_hosts``: it never changes which
+    session was found.
+    """
+    stale_after = _stale_lane_hours()
+    rows = conn.execute(
+        """
+        SELECT session_id, lane, title,
+               GREATEST(COALESCE(last_checkpoint_at, updated_at), updated_at) AS seen_at,
+               TIMESTAMPDIFF(
+                   HOUR,
+                   GREATEST(COALESCE(last_checkpoint_at, updated_at), updated_at),
+                   NOW(3)
+               ) AS idle_hours
+        FROM agent_sessions
+        WHERE agent_id = ? AND operator_id = ? AND workspace_key = ?
+          AND lane <> ? AND status = 'open'
+        ORDER BY idle_hours DESC
+        """,
+        [agent_id, operator_id, workspace_key, exclude_lane],
+    ).fetchall()
+    return [
+        {
+            "session_id": _col(r, "session_id"),
+            "lane": _col(r, "lane"),
+            "title": _col(r, "title"),
+            "last_active_at": _iso(_col(r, "seen_at")),
+            "idle_hours": int(_col(r, "idle_hours") or 0),
+            "stale": int(_col(r, "idle_hours") or 0) >= stale_after,
+        }
+        for r in rows
+    ]
 
 
 def _implied_activity(
@@ -612,6 +687,64 @@ def list_checkpoints(session_id: str, limit: int = 10) -> list[dict[str, Any]]:
         conn.close()
 
 
+def list_decisions(
+    session_id: str, limit: int = 50, include_lineage: bool = False
+) -> list[dict[str, Any]]:
+    """Decisions authored in a session's checkpoints, newest first.
+
+    A decision is written into a checkpoint and then, at the CLI, never read
+    again: the next checkpoint replaces what ``resume`` shows, so the only
+    surface that ever displayed the older ones was the web UI. That made the
+    most durable thing this layer collects the least reachable part of it.
+
+    ``include_lineage`` walks the fork chain. A lane forked for a host switch
+    inherits the reasoning that produced it, and stopping at the fork point
+    would cut the list on how the session was created rather than on what was
+    decided.
+
+    ``limit`` bounds checkpoints read as well as decisions returned, so a long
+    history cannot be pulled across the wire to be thrown away after the first
+    screenful. A checkpoint normally carries at least one decision, so the two
+    bounds agree in practice.
+    """
+    session_ids = [session_id]
+    if include_lineage:
+        lineage = get_session_lineage(session_id)
+        session_ids += [a["session_id"] for a in lineage["ancestors"]]
+
+    placeholders = ", ".join("?" for _ in session_ids)
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT checkpoint_id, session_id, created_at, host_hint, decisions_json
+            FROM session_checkpoints
+            WHERE session_id IN ({placeholders}) AND decisions_json IS NOT NULL
+            ORDER BY created_at DESC, checkpoint_id DESC
+            LIMIT ?
+            """,
+            [*session_ids, int(limit)],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        for text in _from_json(_col(row, "decisions_json")) or []:
+            out.append(
+                {
+                    "decision": text,
+                    "checkpoint_id": _col(row, "checkpoint_id"),
+                    "session_id": _col(row, "session_id"),
+                    "created_at": _iso(_col(row, "created_at")),
+                    "host_hint": _col(row, "host_hint"),
+                }
+            )
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def add_turn(
     session_id: str,
     role: str,
@@ -673,6 +806,7 @@ def resume(
     turn_limit: int = 10,
     lane: str = DEFAULT_LANE,
     host: Optional[HostContext] = None,
+    peek: bool = False,
 ) -> Optional[ResumePack]:
     """Return the resume pack for an identity and lane, or ``None`` if empty.
 
@@ -682,6 +816,9 @@ def resume(
 
     Passing ``host`` records this machine as active in the session, which is
     what later lets another machine be told the lane is already occupied.
+    ``peek`` suppresses that write: looking at a session from a second machine
+    otherwise marks that machine active and makes the first one see contention
+    that never happened.
     """
     conn = connect()
     try:
@@ -713,7 +850,7 @@ def resume(
         others = _live_hosts(
             conn, session.session_id, exclude_host=host.host_hint if host else None
         )
-        if host and session.status == "open":
+        if host and session.status == "open" and not peek:
             _touch_host(conn, session.session_id, host)
 
         return ResumePack(
@@ -721,6 +858,9 @@ def resume(
             checkpoint=_checkpoint_from_row(latest) if latest else None,
             turns=_recent_turns(conn, session.session_id, turn_limit),
             live_hosts=others,
+            other_lanes=_other_open_lanes(
+                conn, agent_id, operator_id, workspace_key, session.lane
+            ),
         )
     finally:
         conn.close()
@@ -758,6 +898,37 @@ def search_sessions(
             params,
         ).fetchall()
         return [SessionRecord.from_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def set_session_title(session_id: str, title: str) -> Optional[SessionRecord]:
+    """Rename a session, or return ``None`` if there is no such session.
+
+    A title is set when the session is opened and never revisited, so it
+    describes what somebody expected the work to be rather than what it became.
+    That is tolerable for a parked session and misleading for a long-lived one:
+    the title is the only human-readable field in ``tree``, so a stale one makes
+    the DAG render a confident and wrong story about where work happened.
+
+    ``updated_at`` is pinned in the UPDATE. It carries ``ON UPDATE
+    CURRENT_TIMESTAMP``, so renaming a lane would otherwise stamp it as active
+    and hide the very staleness the rename is usually correcting.
+    """
+    wanted = (title or "").strip()
+    if not wanted:
+        raise ValueError("a session title cannot be empty")
+    conn = connect()
+    try:
+        if _fetch_session(conn, session_id) is None:
+            return None
+        conn.execute(
+            "UPDATE agent_sessions SET title = ?, updated_at = updated_at "
+            "WHERE session_id = ?",
+            [wanted, session_id],
+        )
+        conn.commit()
+        return _fetch_session(conn, session_id)
     finally:
         conn.close()
 
@@ -1863,6 +2034,33 @@ def render_host_switch_banner(switch: Optional[dict[str, Any]]) -> list[str]:
     return _render_handoff_banner(switch)
 
 
+def _format_idle(hours: int) -> str:
+    """Idle time at the coarsest unit that still distinguishes the cases."""
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def render_other_lanes(lanes: list[dict[str, Any]]) -> list[str]:
+    """Report this identity's other open lanes, stale ones named as such.
+
+    Deliberately at the end of the resume output: it is housekeeping, and it
+    must never come between the reader and the next action.
+    """
+    if not lanes:
+        return []
+    lines = ["", "--- your other open lanes ---"]
+    for item in lanes:
+        title = item.get("title") or "(untitled)"
+        flag = "  <- idle; park it if that work is done" if item.get("stale") else ""
+        lines.append(
+            f"  {item['lane']}  idle {_format_idle(item.get('idle_hours') or 0)}  "
+            f"{str(item['session_id'])[:8]}..  {title}{flag}"
+        )
+    lines.append("  park a finished lane: agentloom-session park --lane <name>")
+    return lines
+
+
 def render_resume_pack(
     pack: Optional[ResumePack], current_host: Optional[str] = None
 ) -> str:
@@ -1925,5 +2123,7 @@ def render_resume_pack(
     if pack.turns:
         lines += ["", "--- recent turns ---"]
         lines += [f"  [{t['seq']}] {t['role']}: {t['summary']}" for t in pack.turns]
+
+    lines += render_other_lanes(pack.other_lanes)
 
     return "\n".join(lines)

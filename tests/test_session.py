@@ -596,3 +596,182 @@ def test_cli_render_tree_node():
     assert "22222222" in lines[1]
     assert "forked: host_switch" in lines[1]
 
+
+# --------------------------------------------------------------------------
+# lane lifecycle — nothing expires a session, so resume has to say so
+# --------------------------------------------------------------------------
+
+
+def test_other_open_lanes_are_reported_after_the_next_action():
+    """Housekeeping must never come between the reader and the next action."""
+    pack = _pack()
+    pack.other_lanes = [
+        {
+            "session_id": "6d670a1f-0000-0000-0000-000000000000",
+            "lane": "master",
+            "title": "Lane concurrency work",
+            "idle_hours": 400,
+            "stale": True,
+        }
+    ]
+    text = render_resume_pack(pack)
+    assert "master" in text
+    assert "6d670a1f" in text
+    assert "park" in text
+    assert text.index("NEXT ACTION:") < text.index("your other open lanes")
+
+
+def test_only_a_stale_lane_is_flagged():
+    fresh = store.render_other_lanes(
+        [{"session_id": "s-1", "lane": "aip", "title": "t", "idle_hours": 2, "stale": False}]
+    )
+    stale = store.render_other_lanes(
+        [{"session_id": "s-1", "lane": "aip", "title": "t", "idle_hours": 400, "stale": True}]
+    )
+    assert not any("park it" in line for line in fresh)
+    assert any("park it" in line for line in stale)
+
+
+def test_a_single_lane_prints_nothing():
+    """The common case is one lane. Saying so every time trains people to skip."""
+    assert store.render_other_lanes([]) == []
+    assert "other open lanes" not in render_resume_pack(_pack())
+
+
+def test_stale_lane_threshold_is_days_not_minutes(monkeypatch):
+    """Liveness and staleness answer different questions at different scales."""
+    monkeypatch.delenv("AGENTLOOM_SESSION_STALE_LANE_HOURS", raising=False)
+    assert store._stale_lane_hours() >= 24
+    assert store._stale_lane_hours() > store._live_window_minutes() / 60
+    monkeypatch.setenv("AGENTLOOM_SESSION_STALE_LANE_HOURS", "5")
+    assert store._stale_lane_hours() == 5
+    monkeypatch.setenv("AGENTLOOM_SESSION_STALE_LANE_HOURS", "soon")
+    assert store._stale_lane_hours() == store.DEFAULT_STALE_LANE_HOURS
+
+
+def test_idle_time_is_shown_at_a_readable_scale():
+    assert store._format_idle(3) == "3h"
+    assert store._format_idle(400) == "16d"
+
+
+def test_other_lanes_query_is_scoped_to_this_identity_and_excludes_this_lane():
+    import inspect
+
+    source = inspect.getsource(store._other_open_lanes)
+    where = source[source.index("WHERE") : source.index("ORDER BY")]
+    assert "agent_id = ?" in where and "operator_id = ?" in where
+    assert "workspace_key = ?" in where
+    assert "lane <> ?" in where, "the lane being resumed must not list itself"
+    assert "status = 'open'" in where, "parked lanes are already accounted for"
+
+
+# --------------------------------------------------------------------------
+# peek — reading a lane is not the same as working in it
+# --------------------------------------------------------------------------
+
+
+class _RecordingConn:
+    """A connection that answers every SELECT with nothing and remembers writes."""
+
+    def __init__(self):
+        self.sql: list[str] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        return self
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def commit(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _resume_sql(peek: bool) -> list[str]:
+    conn = _RecordingConn()
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        store.resume(
+            "envita-builder",
+            "alice",
+            "github.com/acme/widget",
+            host=HostContext(
+                host_hint="laptop-b", ide_hint="cursor", workspace_path_hint=None
+            ),
+            peek=peek,
+        )
+    return conn.sql
+
+
+def test_peek_never_writes_session_hosts():
+    """Looking at a lane from a second machine must not manufacture contention.
+
+    Without this, checking where work stands is indistinguishable from working
+    there, and the machine that actually holds the lane gets warned about a
+    colleague who only read.
+    """
+    assert not any("session_hosts" in sql and "INSERT" in sql for sql in _resume_sql(True))
+
+
+def test_a_normal_resume_still_records_this_host():
+    """The guard would be equally satisfied by never recording at all."""
+    conn = _RecordingConn()
+    row = {
+        "session_id": "s-1",
+        "agent_id": "envita-builder",
+        "operator_id": "alice",
+        "workspace_key": "github.com/acme/widget",
+        "lane": "default",
+        "status": "open",
+        "parent_session_id": None,
+        "fork_checkpoint_id": None,
+        "fork_reason": None,
+        "title": "Some work",
+        "workspace_path_hint": None,
+        "host_hint": None,
+        "ide_hint": None,
+        "created_at": None,
+        "updated_at": None,
+        "last_checkpoint_at": None,
+    }
+    # Only the session lookup finds anything; a checkpoint row has other columns.
+    conn.fetchone = lambda: row if "agent_sessions" in conn.sql[-1] else None  # type: ignore[method-assign]
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        store.resume(
+            "envita-builder",
+            "alice",
+            "github.com/acme/widget",
+            host=HostContext(
+                host_hint="laptop-b", ide_hint="cursor", workspace_path_hint=None
+            ),
+        )
+    assert any("session_hosts" in sql and "INSERT" in sql for sql in conn.sql)
+
+
+# --------------------------------------------------------------------------
+# retitling — the only human-readable field in the DAG
+# --------------------------------------------------------------------------
+
+
+def test_retitle_does_not_float_the_session_to_the_top():
+    """`updated_at` carries ON UPDATE CURRENT_TIMESTAMP.
+
+    Letting it move would stamp a lane as active for the one operation most
+    often used to correct a lane nobody has touched in weeks.
+    """
+    import inspect
+
+    source = inspect.getsource(store.set_session_title)
+    update = source[source.index("UPDATE agent_sessions") :]
+    assert "updated_at = updated_at" in update
+
+
+def test_an_empty_title_is_refused():
+    """Clearing the title would leave `tree` with nothing to render at all."""
+    with pytest.raises(ValueError):
+        store.set_session_title("s-1", "   ")
