@@ -7,6 +7,7 @@ separately against a dedicated test database.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -530,6 +531,41 @@ def test_session_in_use_error_names_the_machine_to_ask_about():
     assert "fiu-gis-center" in str(exc)
     assert "s-1" in str(exc)
     assert exc.hosts[0]["host"] == "fiu-gis-center"
+
+
+def test_agent_id_resolves_from_the_repository_env_file(tmp_path, monkeypatch, capsys):
+    """A checkout's `.env` supplies the agent id, so no command needs `--agent`.
+
+    Identity is read from the environment before any command opens a
+    connection, so the entry point has to load `.env` itself. Leaving it to the
+    database adapter is invisible on the commands that never connect: `whoami`
+    and `tree` fail with "no agent id" on a machine whose `.env` is correct,
+    while `doctor` reports the id as fine because it loads config on its own.
+    """
+    from agentloom_runtime import config
+    from agentloom_runtime.session import cli
+
+    (tmp_path / ".env").write_text("AGENTLOOM_AGENT_ID=env-file-agent\n", encoding="utf-8")
+    monkeypatch.delenv("AGENTLOOM_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENTLOOM_ENV_FILE", raising=False)
+    monkeypatch.setattr(config, "_loaded", set())
+
+    assert cli.main(["whoami", "--path", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["agent_id"] == "env-file-agent"
+
+
+def test_an_explicit_agent_outranks_the_env_file(tmp_path, monkeypatch, capsys):
+    """`.env` fills a gap; it never overrides what the caller asked for."""
+    from agentloom_runtime import config
+    from agentloom_runtime.session import cli
+
+    (tmp_path / ".env").write_text("AGENTLOOM_AGENT_ID=env-file-agent\n", encoding="utf-8")
+    monkeypatch.delenv("AGENTLOOM_AGENT_ID", raising=False)
+    monkeypatch.delenv("AGENTLOOM_ENV_FILE", raising=False)
+    monkeypatch.setattr(config, "_loaded", set())
+
+    assert cli.main(["whoami", "--agent", "explicit", "--path", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["agent_id"] == "explicit"
 
 
 def test_cli_render_tree_node():

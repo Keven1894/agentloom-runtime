@@ -65,7 +65,7 @@ by tests in `tests/test_session.py`, not just by convention.
 
 | # | Invariant |
 |---|---|
-| **H1** | Session identity is `(agent_id, operator_id, workspace_key)`. `workspace_key` derives from the VCS remote, never from a filesystem path, machine name, or editor. |
+| **H1** | Session identity is `(agent_id, operator_id, workspace_key, lane)`. `workspace_key` derives from the VCS remote and `lane` names a work stream, never a filesystem path, machine name, or editor. |
 | **H2** | `host_hint`, `ide_hint`, and `workspace_path_hint` are write-only provenance. They must never appear in a lookup predicate or a lookup index. |
 | **H3** | Every operation is reachable from a plain shell command. No editor extension, plugin, or SDK is required. |
 | **H4** | Resume output is plain text (or JSON), readable by any agent without parsing a proprietary format. |
@@ -90,6 +90,28 @@ workspace. A directory without a remote falls back to `local:<directory-name>`,
 which still matches across machines when the folder name matches — usable, but
 prefer a real remote.
 
+### Why the lane
+
+At most one session may be open per identity, which is exactly right for a
+handoff and fatal for two machines doing unrelated work: the second cannot get a
+slot, and forking to make one parks the first machine's live session.
+
+The tempting fix is to key on the host. That buys concurrency by destroying the
+reason this layer exists, since a session keyed to a machine is no longer
+resumable from anywhere. The missing dimension is the **work stream**. A lane
+names what is being worked on, so two lanes can be open at once while either
+host can still resume either lane. Two sessions in the same lane still collide,
+which is the protection worth keeping.
+
+Lane defaults to `default`, so a host that never passes one resumes exactly what
+it resumed before. `AGENTLOOM_SESSION_LANE` pins it per checkout; an explicit
+`--lane` outranks the environment.
+
+Liveness (`session_hosts`) is read only to **refuse** a destructive fork, never
+to select a session. Lookup still keys on
+`(agent_id, operator_id, workspace_key, lane)` and never on a machine name, so
+H2 is untouched.
+
 ## Invocation surfaces
 
 Three surfaces over one store, ordered by how universally they work. Pick the
@@ -105,6 +127,11 @@ highest one your host supports; the lower ones remain available.
 Every AI coding host can run a shell command. That is why the CLI is the floor
 and why no feature may be CLI-inaccessible.
 
+Configuration comes from the process environment or the repository's `.env`,
+whichever is present; the real environment always wins. Both entry points load
+it before resolving identity, so `AGENTLOOM_AGENT_ID` in a checkout's `.env` is
+enough and no command needs `--agent`.
+
 ```bash
 export AGENTLOOM_AGENT_ID=my-builder
 export AGENTLOOM_DB_HOST=… AGENTLOOM_DB_NAME=… AGENTLOOM_DB_USER=… AGENTLOOM_DB_PASSWORD=…
@@ -112,8 +139,10 @@ export AGENTLOOM_DB_HOST=… AGENTLOOM_DB_NAME=… AGENTLOOM_DB_USER=… AGENTLO
 agentloom-session whoami       # show resolved identity (debug host neutrality)
 agentloom-session resume       # print the resume pack
 agentloom-session checkpoint --next "Apply the migration to dev" --plan docs/plan/x.md
-agentloom-session park         # pause; frees the identity's open slot
+agentloom-session list         # every session for this identity, with lane and status
+agentloom-session park         # pause; frees this lane's open slot
 
+agentloom-session open --lane medialoom --title "…"            # a second concurrent work stream
 agentloom-session open --fork-from <id> --reason host_switch   # branch session into DAG
 agentloom-session tree         # render ASCII DAG session hierarchy
 agentloom-session lineage      # inspect session ancestry and child branches
@@ -181,13 +210,14 @@ resume, the state was never really in Layer 0.
 
 ## Data model
 
-Four tables plus a locator (`migrations/mysql/004_session_memory.sql`,
+Five tables plus a locator (`migrations/mysql/004_session_memory.sql`,
 `005_session_transcripts.sql`, `006_session_transcript_index.sql`), then
-additive migrations for listing copy, locale, and batch-job traces:
+additive migrations for listing copy, locale, batch-job traces, and lanes:
 
 | Table | Holds |
 |---|---|
-| `agent_sessions` | one row per working session; a generated `open_key` enforces at most one open session per identity |
+| `agent_sessions` | one row per working session; a generated `open_key` enforces at most one open session per identity **and lane** |
+| `session_hosts` | which machines have worked in a session and when each was last seen; read only to refuse a destructive fork, never to resolve a session |
 | `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, transcript citations |
 | `session_turns` | optional short turn summaries |
 | `session_transcripts` | archived conversations, redacted and compressed, keyed by `(source_host, source_ref)` |
@@ -206,6 +236,16 @@ progress and judgement to `session_job_*` (migration 015), not to a file beside
 the checkout. Overlay presence is derivable from `presentation_json`; the
 reviewer's verdict is not, which is why it has its own column
 (`qc_report_json`). The runtime module is `agentloom_runtime.session.jobs`.
+
+Lanes ship as expand/contract across two migrations because they rewrite a
+unique index both machines depend on. **016** is additive: it adds `lane` and
+`session_hosts` but leaves `open_key` alone, so a host on pre-lane code still
+sees one open session per identity. **017** rebuilds `open_key` to include the
+lane. The order is mandatory — pre-lane code's open lookup does not filter on
+lane and ends in `LIMIT 1` with no `ORDER BY`, so once a second lane exists it
+would pick one arbitrarily, including for the implicit open that `checkpoint`
+performs. `agentloom-session init --through` lets a fleet sit at 016 until every
+host is upgraded.
 
 ### What is stored
 
@@ -276,10 +316,14 @@ rows with `locale=en` or `locale=es`; they do not replace the original.
 - Rewriting `body_zlib` to store a translation.
 - Keeping job resume state or review verdicts in a checkout-local file.
 - Keying per-transcript job state on the run rather than `(job_kind, transcript_id)`.
+- Keying a lane on a machine instead of on the work stream.
+- Reading `session_hosts` to decide *which* session to resume rather than only to refuse a fork.
+- Forking on `ANOTHER MACHINE IS WORKING HERE`, which parks a live session; take a lane instead.
 
 ## Related
 
 - [`memory-reconstruction.md`](memory-reconstruction.md) — the mechanism behind this contract, in diagrams: reconstruction vs. migration, identity derivation, the cross-machine lifecycle, and the retrieval cost ladder.
+- Envita companion: `docs/architecture/memory/multi-host-concurrency-and-the-execution-boundary.md` in the deployment repository — lanes and liveness as deployed, the two banners, and the master/follower execution boundary.
 - Envita companion: `docs/architecture/memory/layer-0-archive-presentation-and-job-trace.md` in the deployment repository — overlay shape, locale index, job-trace tables, translator vs. independent reviewer.
 - [`three-layer-memory-architecture.md`](three-layer-memory-architecture.md) — layers 1–3 and the retrieval router.
 - [`kg-sync-and-maintenance.md`](kg-sync-and-maintenance.md) — the file → database sync contract.

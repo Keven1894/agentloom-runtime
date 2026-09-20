@@ -14,14 +14,16 @@ Three things, and nothing else:
 
 | Piece | What it is |
 |---|---|
-| Seven tables | Sessions, checkpoints, turns, and the conversation archive |
+| Nine tables | Sessions, checkpoints, turns, the conversation archive, and its locator |
 | `agentloom-session` | A console script — the portability floor, since every host can run a shell command |
 | A bootstrap instruction | One line in your agent's rule file telling it to resume first |
 
-Session identity is `(agent_id, operator_id, workspace_key)`, where
-`workspace_key` is the normalized VCS remote URL. That is the entire reason this
-survives switching machines: nothing in the lookup path is a filesystem path, a
-hostname, or an editor-local store.
+Session identity is `(agent_id, operator_id, workspace_key, lane)`, where
+`workspace_key` is the normalized VCS remote URL and `lane` names a work stream.
+That is the entire reason this survives switching machines: nothing in the
+lookup path is a filesystem path, a hostname, or an editor-local store. Leave
+`lane` alone until you have two machines working at once; it defaults to
+`default` and one open session per identity is what you want for a handoff.
 
 ## 1. Install
 
@@ -43,6 +45,8 @@ AGENTLOOM_AGENT_ID=my-agent
 
 Set `AGENTLOOM_AGENT_ID` here rather than passing `--agent` on every command.
 It is the one identity component that cannot be detected from the environment.
+Both the CLI and the MCP server load this file before resolving identity, so a
+value here is enough — a real environment variable still wins over it.
 
 Optional, for semantic search over past sessions:
 
@@ -92,10 +96,14 @@ ignoring:
 agentloom-session open --title "add retry backoff"
 agentloom-session checkpoint --next "apply the migration to dev"
 agentloom-session resume          # from any machine, any IDE
+agentloom-session park            # when that work stream is done
 ```
 
 `resume` is the one that matters. It returns the last checkpoint's next action,
 the open plan, and the working-tree state at that point.
+
+`park` matters more than it looks. Nothing expires an open session, so a work
+stream you finished and walked away from stays open and keeps its slot.
 
 ## 6. Make your agent do it automatically
 

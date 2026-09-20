@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from agentloom_runtime.config import load_env
 from agentloom_runtime.session import store
 from agentloom_runtime.session.identity import (
     detect_host_context,
@@ -937,6 +938,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    # Identity resolves from the environment before any command opens a
+    # connection, so the .env cannot wait for the database adapter to load it:
+    # AGENTLOOM_AGENT_ID set in a repository's .env would be invisible and
+    # every command would need an explicit --agent.
+    load_env(Path(args.path) if getattr(args, "path", None) else None)
     return int(args.func(args))
 
 

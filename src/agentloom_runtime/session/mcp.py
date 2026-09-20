@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from agentloom_runtime.config import load_env
 from agentloom_runtime.session import store
 from agentloom_runtime.session.identity import (
     detect_host_context,
@@ -523,6 +524,9 @@ def run_stdio_server() -> int:
 
 
 def main() -> int:
+    # Same ordering requirement as the CLI: identity is read from the
+    # environment on the first tool call, before anything opens a connection.
+    load_env()
     return run_stdio_server()
 
 
