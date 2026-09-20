@@ -57,7 +57,7 @@ def _resolve_session_id(args: argparse.Namespace) -> str:
         return args.session
     agent_id, operator_id, workspace_key = _identity(args)
     lane = _lane(args)
-    pack = store.resume(agent_id, operator_id, workspace_key, turn_limit=0, lane=lane)
+    pack = store.resume(agent_id, operator_id, workspace_key, lane=lane)
     if pack is None:
         raise SystemExit(
             f"error: no open session for this identity in lane '{lane}'. "
@@ -137,7 +137,6 @@ def cmd_resume(args: argparse.Namespace) -> int:
         agent_id,
         operator_id,
         workspace_key,
-        turn_limit=args.turns,
         lane=_lane(args),
         host=host,
         peek=getattr(args, "peek", False),
@@ -427,14 +426,6 @@ def cmd_search(args: argparse.Namespace) -> int:
         "\n".join(lines) or "no matching conversations",
         args.json,
     )
-    return 0
-
-
-def cmd_turn(args: argparse.Namespace) -> int:
-    session_id = _resolve_session_id(args)
-    host = detect_host_context(Path(args.path) if args.path else None)
-    turn_id = store.add_turn(session_id, args.role, args.summary, host=host)
-    _emit({"turn_id": turn_id, "session_id": session_id}, f"turn {turn_id} added", args.json)
     return 0
 
 
@@ -841,7 +832,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("resume", help="print the resume pack for this identity")
     _add_common(p)
-    p.add_argument("--turns", type=int, default=10, help="recent turn summaries to include")
     p.add_argument(
         "--peek",
         action="store_true",
@@ -925,13 +915,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", help="only conversations captured at or after this timestamp")
     p.add_argument("--lexical", action="store_true", help="skip vector search")
     p.set_defaults(func=cmd_search)
-
-    p = sub.add_parser("turn", help="append a short turn summary")
-    _add_common(p)
-    p.add_argument("--session", help="explicit session id")
-    p.add_argument("--role", required=True, choices=["human", "agent", "system"])
-    p.add_argument("--summary", required=True)
-    p.set_defaults(func=cmd_turn)
 
     p = sub.add_parser("list", help="list sessions")
     _add_common(p)

@@ -288,7 +288,6 @@ def _pack() -> ResumePack:
             "transcript_citations": ["uuid-1"],
             "payload": None,
         },
-        turns=[{"seq": 1, "role": "human", "summary": "asked for a plan", "created_at": None}],
     )
 
 
@@ -769,6 +768,21 @@ def test_retitle_does_not_float_the_session_to_the_top():
     source = inspect.getsource(store.set_session_title)
     update = source[source.index("UPDATE agent_sessions") :]
     assert "updated_at = updated_at" in update
+
+
+def test_session_turns_is_gone_and_nothing_still_reaches_for_it():
+    """Retired 2026-09-20 after eighteen days and zero rows.
+
+    Migration 018 drops the table, so a surviving reference is not a dead
+    branch — it is a query against a table that no longer exists, in the one
+    command an agent runs before doing anything else.
+    """
+    source = (SESSION_PKG / "store.py").read_text(encoding="utf-8")
+    assert "session_turns" not in source
+    assert not hasattr(store, "add_turn")
+
+    cli = (SESSION_PKG / "cli.py").read_text(encoding="utf-8")
+    assert "add_turn" not in cli and "turn_limit" not in cli
 
 
 def test_an_empty_title_is_refused():

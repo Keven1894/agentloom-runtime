@@ -317,9 +317,7 @@ def tool_session_get_checkpoint(arguments: dict[str, Any]) -> str:
 
     host = detect_host_context()
     lane = _resolve_lane(arguments)
-    pack = store.resume(
-        agent_id, operator_id, workspace_key, turn_limit=5, lane=lane, host=host
-    )
+    pack = store.resume(agent_id, operator_id, workspace_key, lane=lane, host=host)
     if pack is None:
         return (
             f"No active or parked session found for ({agent_id}, {operator_id}, "
@@ -339,7 +337,7 @@ def tool_session_get_lineage(arguments: dict[str, Any]) -> str:
         except ValueError as exc:
             return f"Error: {exc}"
         pack = store.resume(
-            agent_id, operator_id, workspace_key, turn_limit=0, lane=_resolve_lane(arguments)
+            agent_id, operator_id, workspace_key, lane=_resolve_lane(arguments)
         )
         if pack is None:
             return (

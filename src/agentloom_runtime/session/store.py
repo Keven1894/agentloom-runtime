@@ -44,7 +44,6 @@ __all__ = [
     "SessionOpenError",
     "SessionRecord",
     "TranscriptRecord",
-    "add_turn",
     "checkpoint",
     "close_session",
     "list_session_hosts",
@@ -255,7 +254,6 @@ class ResumePack:
 
     session: SessionRecord
     checkpoint: Optional[dict[str, Any]] = None
-    turns: list[dict[str, Any]] = field(default_factory=list)
     # Other machines currently active in this session. Advisory: it changes
     # what the operator is asked, never which session was found.
     live_hosts: list[dict[str, Any]] = field(default_factory=list)
@@ -268,7 +266,6 @@ class ResumePack:
         return {
             "session": self.session.to_dict(),
             "checkpoint": self.checkpoint,
-            "turns": self.turns,
             "live_hosts": self.live_hosts,
             "other_lanes": self.other_lanes,
         }
@@ -745,65 +742,10 @@ def list_decisions(
     return out
 
 
-def add_turn(
-    session_id: str,
-    role: str,
-    summary: str,
-    host: Optional[HostContext] = None,
-) -> str:
-    """Append a short turn summary. Never store full host transcripts here."""
-    if role not in {"human", "agent", "system"}:
-        raise ValueError(f"invalid role: {role}")
-    turn_id = str(uuid.uuid4())
-    conn = connect()
-    try:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM session_turns WHERE session_id = ?",
-            [session_id],
-        ).fetchone()
-        seq = int(row["max_seq"]) + 1
-        conn.execute(
-            "INSERT INTO session_turns (turn_id, session_id, seq, role, summary) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [turn_id, session_id, seq, role, summary],
-        )
-        conn.commit()
-        if host:
-            _touch_host(conn, session_id, host)
-        return turn_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-
-def _recent_turns(conn: Any, session_id: str, limit: int) -> list[dict[str, Any]]:
-    if limit <= 0:
-        return []
-    rows = conn.execute(
-        "SELECT seq, role, summary, created_at FROM session_turns "
-        "WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
-        [session_id, int(limit)],
-    ).fetchall()
-    turns = [
-        {
-            "seq": row["seq"],
-            "role": row["role"],
-            "summary": row["summary"],
-            "created_at": _iso(row["created_at"]),
-        }
-        for row in rows
-    ]
-    turns.reverse()
-    return turns
-
-
 def resume(
     agent_id: str,
     operator_id: str,
     workspace_key: str,
-    turn_limit: int = 10,
     lane: str = DEFAULT_LANE,
     host: Optional[HostContext] = None,
     peek: bool = False,
@@ -856,7 +798,6 @@ def resume(
         return ResumePack(
             session=session,
             checkpoint=_checkpoint_from_row(latest) if latest else None,
-            turns=_recent_turns(conn, session.session_id, turn_limit),
             live_hosts=others,
             other_lanes=_other_open_lanes(
                 conn, agent_id, operator_id, workspace_key, session.lane
@@ -2119,10 +2060,6 @@ def render_resume_pack(
         if citations:
             lines += ["", "transcript citations:"]
             lines += [f"  - {item}" for item in citations]
-
-    if pack.turns:
-        lines += ["", "--- recent turns ---"]
-        lines += [f"  [{t['seq']}] {t['role']}: {t['summary']}" for t in pack.turns]
 
     lines += render_other_lanes(pack.other_lanes)
 

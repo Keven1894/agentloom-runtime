@@ -85,6 +85,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration("015_session_job_trace.sql", "session", "batch job runs, per-item state, event trace"),
     Migration("016_session_lanes.sql", "session", "lane column and per-host activity"),
     Migration("017_session_lane_identity.sql", "session", "lane joins the open-session key"),
+    Migration("018_drop_session_turns.sql", "session", "retire the unused turn-summary table"),
 )
 
 

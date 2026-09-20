@@ -14,7 +14,7 @@ Three things, and nothing else:
 
 | Piece | What it is |
 |---|---|
-| Nine tables | Sessions, checkpoints, turns, the conversation archive, and its locator |
+| Eight tables | Sessions, checkpoints, per-host activity, the conversation archive, and its locator |
 | `agentloom-session` | A console script — the portability floor, since every host can run a shell command |
 | A bootstrap instruction | One line in your agent's rule file telling it to resume first |
 

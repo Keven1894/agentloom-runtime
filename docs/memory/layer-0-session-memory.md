@@ -224,7 +224,6 @@ additive migrations for listing copy, locale, batch-job traces, and lanes:
 | `agent_sessions` | one row per working session; a generated `open_key` enforces at most one open session per identity **and lane** |
 | `session_hosts` | which machines have worked in a session and when each was last seen; read only to refuse a destructive fork, never to resolve a session |
 | `session_checkpoints` | resume points: next action, open plan, VCS state, decisions, transcript citations |
-| `session_turns` | optional short turn summaries |
 | `session_transcripts` | archived conversations, redacted and compressed, keyed by `(source_host, source_ref)` |
 | `session_transcript_chunks` | search index over the archive: session-level nodes + overlapping prose windows (human/agent text only). Embeddings optional; lexical search works without them. `locale` (`original` / `en` / `es`) is part of the unique key so translated overlays do not collide with the original. |
 | `session_job_runs` | one invocation of a long-running job over the archive (host, models, filters) |
@@ -251,6 +250,15 @@ lane and ends in `LIMIT 1` with no `ORDER BY`, so once a second lane exists it
 would pick one arbitrarily, including for the implicit open that `checkpoint`
 performs. `agentloom-session init --through` lets a fleet sit at 016 until every
 host is upgraded.
+
+**018** drops `session_turns`, a table created in 004 to hold short per-turn
+summaries. Nothing ever wrote one: the only path to it required a hand-typed
+summary at the exact moment somebody is trying to stop working, and the archive
+already answers that question at full fidelity. Two records of one fact is a
+maintenance cost with no reader, so the unpopulated one went. Same ordering
+requirement as 017 in the other direction — apply it only once every host runs
+code that no longer reads the table, since a host on older code fails its whole
+resume rather than just the turn lookup.
 
 ### What is stored
 
