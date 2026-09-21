@@ -144,6 +144,7 @@ agentloom-session checkpoint --auto --if-stale 4   # automation: refresh state, 
 agentloom-session list         # every session for this identity, with lane and status
 agentloom-session park         # pause; frees this lane's open slot
 agentloom-session title "…"    # correct a session title that no longer describes the work
+agentloom-session alias --add <old-key> --to <current-key> --migrate   # a remote moved
 
 agentloom-session decisions --lineage   # decisions under the newest checkpoint, across the fork chain
 agentloom-session checkpoints  # the checkpoint history, not just the latest
@@ -252,6 +253,20 @@ would pick one arbitrarily, including for the implicit open that `checkpoint`
 performs. `agentloom-session init --through` lets a fleet sit at 016 until every
 host is upgraded.
 
+**019** adds `workspace_aliases`. Deriving identity from the VCS remote is what
+makes a session resumable from any checkout, and nothing about an alias weakens
+that — but the derivation quietly assumes the remote is immortal, and remotes
+move. A machine whose checkout still points at the old one derives a different
+key and opens its own session instead of resuming the shared one. Resolution
+happens once on the identity path and is **one hop**: a canonical key may not
+itself be an alias, enforced by the writer, so a cycle cannot be created rather
+than having to be detected. It fails open, so `whoami` still answers offline.
+`--migrate` re-files rows already stored under the old key across all four
+workspace-keyed tables, pinning the `ON UPDATE CURRENT_TIMESTAMP` columns —
+otherwise every recovered row is dated to the day of the remap, and `resume`,
+which falls back to the most recently updated parked session in a lane, would
+prefer a long-dead session over the one somebody paused yesterday.
+
 **018** drops `session_turns`, a table created in 004 to hold short per-turn
 summaries. Nothing ever wrote one: the only path to it required a hand-typed
 summary at the exact moment somebody is trying to stop working, and the archive
@@ -358,6 +373,8 @@ rows with `locale=en` or `locale=es`; they do not replace the original.
 - Forking on `ANOTHER MACHINE IS WORKING HERE`, which parks a live session; take a lane instead.
 - Letting automation author a `--next`, or render an automatic checkpoint as though a person wrote it.
 - Deciding staleness by subtracting a server timestamp from the local clock.
+- Chaining workspace aliases, or resolving them anywhere but the identity path.
+- Re-filing rows under a new workspace key without pinning `ON UPDATE` columns.
 
 ## Related
 

@@ -176,10 +176,14 @@ TOOLS: list[dict[str, Any]] = [
 
 
 def _resolve_workspace(override: Optional[str]) -> str:
+    # Alias resolution applies to an override too: a caller passing the old
+    # key by hand means the same workspace as one deriving it from a stale
+    # remote, and the two surfaces must not disagree about which session that
+    # is.
     if override:
-        return override
+        return store.resolve_workspace_key(override)
     try:
-        return detect_workspace_key()
+        return store.resolve_workspace_key(detect_workspace_key())
     except Exception:
         return ""
 

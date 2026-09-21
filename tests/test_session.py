@@ -792,6 +792,100 @@ def test_an_empty_title_is_refused():
 
 
 # --------------------------------------------------------------------------
+# workspace aliases — deriving identity from a remote that can move
+# --------------------------------------------------------------------------
+
+
+def test_an_alias_cannot_point_at_itself():
+    with pytest.raises(ValueError):
+        store.add_workspace_alias("github.com/acme/widget", "github.com/acme/widget")
+
+
+def test_an_alias_needs_both_halves():
+    with pytest.raises(ValueError):
+        store.add_workspace_alias("", "github.com/acme/widget")
+    with pytest.raises(ValueError):
+        store.add_workspace_alias("github.com/acme/widget", "   ")
+
+
+def test_resolution_is_one_hop_and_chains_are_refused_at_write_time():
+    """A cycle should be impossible to create, not something the reader detects.
+
+    Resolution runs on the identity path of every command, so it has to stay a
+    single indexed lookup. That only holds if a canonical key is never itself
+    an alias, which is a writer's job to enforce.
+    """
+    import inspect
+
+    resolve = inspect.getsource(store.resolve_workspace_key)
+    assert resolve.count("SELECT") == 1, "more than one lookup means more than one hop"
+
+    add = inspect.getsource(store.add_workspace_alias)
+    assert "chained" in add
+    assert "is itself an alias" in add
+
+
+def test_resolution_fails_open_when_the_database_is_unreachable():
+    """`whoami` must keep working offline, and used to.
+
+    Anything that actually touches session state opens its own connection a
+    moment later and reports a better error than this function could.
+    """
+    with patch(
+        "agentloom_runtime.session.store.connect", side_effect=RuntimeError("no db")
+    ):
+        assert store.resolve_workspace_key("github.com/acme/widget") == (
+            "github.com/acme/widget"
+        )
+
+
+def test_a_remap_moves_the_archive_too():
+    """Sessions without their conversations is a half-migrated workspace.
+
+    Moving the sessions alone leaves the transcripts searchable only under a
+    key nobody derives any more.
+    """
+    assert "session_transcripts" in store._WORKSPACE_KEYED_TABLES
+    assert "session_transcript_chunks" in store._WORKSPACE_KEYED_TABLES
+    assert "agent_sessions" in store._WORKSPACE_KEYED_TABLES
+
+
+def test_a_remap_does_not_date_every_moved_row_to_today():
+    """`updated_at` carries ON UPDATE CURRENT_TIMESTAMP on two of these tables.
+
+    Worse here than for a rename: `resume` falls back to the most recently
+    updated *parked* session in a lane, so an old session recovered by an alias
+    would outrank the one somebody actually paused yesterday.
+    """
+    import inspect
+
+    assert store._WORKSPACE_KEYED_TABLES["agent_sessions"] == "updated_at"
+    source = inspect.getsource(store.add_workspace_alias)
+    assert "{pinned} = {pinned}" in source
+
+
+def test_a_remap_checks_the_open_session_collision_before_the_update():
+    """`open_key` enforces one open session per identity and lane.
+
+    Re-filing an open session into a lane that already has one hits a unique
+    index, and the raw error is a duplicate-entry message about a generated
+    column. The check exists to name the fix instead.
+    """
+    import inspect
+
+    source = inspect.getsource(store.add_workspace_alias)
+    assert source.index("Park one of them first") < source.index("UPDATE {table}")
+
+
+def test_both_surfaces_resolve_the_alias():
+    """The CLI and the MCP server must not disagree about which session this is."""
+    cli_source = (SESSION_PKG / "cli.py").read_text(encoding="utf-8")
+    mcp_source = (SESSION_PKG / "mcp.py").read_text(encoding="utf-8")
+    assert "resolve_workspace_key" in cli_source
+    assert "resolve_workspace_key" in mcp_source
+
+
+# --------------------------------------------------------------------------
 # automatic checkpoints — refreshing state without speaking for a human
 # --------------------------------------------------------------------------
 

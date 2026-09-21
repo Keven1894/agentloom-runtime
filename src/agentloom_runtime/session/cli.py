@@ -40,7 +40,10 @@ def _identity(args: argparse.Namespace) -> tuple[str, str, str]:
         )
     operator_id = resolve_operator_id(args.operator)
     workspace_key = args.workspace or detect_workspace_key(Path(args.path) if args.path else None)
-    return agent_id, operator_id, workspace_key
+    # Applied once, here, so a checkout still pointing at a moved remote
+    # resolves to the shared workspace for every command rather than opening
+    # its own session under a key nobody else derives.
+    return agent_id, operator_id, store.resolve_workspace_key(workspace_key)
 
 
 def _lane(args: argparse.Namespace) -> str:
@@ -522,6 +525,36 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_alias(args: argparse.Namespace) -> int:
+    if not args.add:
+        rows = store.list_workspace_aliases()
+        lines = [
+            f"{r['alias_key']}\n  -> {r['canonical_key']}"
+            + (f"\n     {r['note']}" if r.get("note") else "")
+            for r in rows
+        ]
+        _emit(rows, "\n".join(lines) or "No workspace aliases registered.", args.json)
+        return 0
+
+    if not args.to:
+        raise SystemExit("error: --add needs --to <canonical workspace key>")
+    try:
+        result = store.add_workspace_alias(
+            args.add, args.to, note=args.note, migrate_existing=args.migrate
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+
+    lines = [f"{result['alias_key']}\n  -> {result['canonical_key']}"]
+    lines += [
+        f"  re-filed {count} row(s) in {table}"
+        for table, count in (result.get("moved") or {}).items()
+        if count
+    ]
+    _emit(result, "\n".join(lines), args.json)
+    return 0
+
+
 def cmd_title(args: argparse.Namespace) -> int:
     session_id = _resolve_session_id(args)
     try:
@@ -983,6 +1016,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="include the sessions this one was forked from",
     )
     p.set_defaults(func=cmd_decisions)
+
+    p = sub.add_parser(
+        "alias", help="list or register workspace keys that mean the same repository"
+    )
+    _add_common(p)
+    p.add_argument("--add", metavar="OLD_KEY", help="the key a moved remote still derives")
+    p.add_argument("--to", metavar="CANONICAL_KEY", help="the key it should resolve to")
+    p.add_argument("--note", help="why this alias exists")
+    p.add_argument(
+        "--migrate",
+        action="store_true",
+        help="also re-file sessions, transcripts and job runs already stored "
+        "under the old key",
+    )
+    p.set_defaults(func=cmd_alias)
 
     p = sub.add_parser("title", help="rename a session")
     _add_common(p)

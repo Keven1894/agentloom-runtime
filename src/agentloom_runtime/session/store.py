@@ -55,8 +55,11 @@ __all__ = [
     "compact_embeddings",
     "count_transcripts",
     "index_workspace",
+    "add_workspace_alias",
     "hours_since_last_checkpoint",
     "is_auto_checkpoint",
+    "list_workspace_aliases",
+    "resolve_workspace_key",
     "list_checkpoints",
     "list_decisions",
     "list_transcripts",
@@ -688,6 +691,186 @@ def list_checkpoints(session_id: str, limit: int = 10) -> list[dict[str, Any]]:
             [session_id, int(limit)],
         ).fetchall()
         return [_checkpoint_from_row(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# Every table that files a row under a workspace, mapped to the column that
+# must be pinned when a row is re-filed. Listed once, because a remap that
+# moves the sessions but leaves the archive behind produces a workspace whose
+# conversations cannot be searched from the key that now owns them.
+#
+# The pinned columns carry ON UPDATE CURRENT_TIMESTAMP. Letting them float
+# would date every moved row to the day of the remap, which is worse here than
+# it looks: `resume` falls back to the most recently updated *parked* session
+# in a lane, so a years-old session recovered by an alias would outrank the one
+# somebody actually paused yesterday.
+_WORKSPACE_KEYED_TABLES: dict[str, Optional[str]] = {
+    "agent_sessions": "updated_at",
+    "session_transcripts": None,
+    "session_transcript_chunks": "updated_at",
+    "session_job_runs": None,
+}
+
+
+def resolve_workspace_key(workspace_key: str) -> str:
+    """Map a derived workspace key through its alias, if one is registered.
+
+    Called on the identity path of every command, so it is one indexed lookup
+    and exactly one hop — `add_workspace_alias` refuses to point an alias at
+    another alias, which makes a cycle impossible to create rather than
+    something this has to detect.
+
+    Fails open. If the database cannot be reached, the derived key is returned
+    unchanged so offline commands like `whoami` keep working; anything that
+    actually touches session state will fail on its own connection a moment
+    later, with a better error than this one could give.
+    """
+    if not workspace_key:
+        return workspace_key
+    try:
+        conn = connect()
+    except Exception:
+        return workspace_key
+    try:
+        row = conn.execute(
+            "SELECT canonical_key FROM workspace_aliases WHERE alias_key = ?",
+            [workspace_key],
+        ).fetchone()
+    except Exception:
+        # Also covers a database that predates migration 019.
+        return workspace_key
+    finally:
+        conn.close()
+    return _col(row, "canonical_key") if row else workspace_key
+
+
+def list_workspace_aliases() -> list[dict[str, Any]]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT alias_key, canonical_key, note, created_at FROM workspace_aliases "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "alias_key": _col(r, "alias_key"),
+            "canonical_key": _col(r, "canonical_key"),
+            "note": _col(r, "note"),
+            "created_at": _iso(_col(r, "created_at")),
+        }
+        for r in rows
+    ]
+
+
+def add_workspace_alias(
+    alias_key: str,
+    canonical_key: str,
+    note: Optional[str] = None,
+    migrate_existing: bool = False,
+) -> dict[str, Any]:
+    """Register ``alias_key`` as another name for ``canonical_key``.
+
+    Three refusals, each closing a way the table could stop being a flat
+    one-hop map:
+
+    - An alias may not equal its canonical key, which would be a no-op row that
+      still costs a lookup.
+    - A canonical key may not itself be an alias, because resolution is one
+      hop; allowing it would silently drop the second.
+    - An existing alias may not be pointed somewhere new by this call. Moving a
+      workspace twice is a real situation, but it is not one to handle by
+      accident, and the rows already filed under it need a decision.
+
+    ``migrate_existing`` re-files rows already stored under the old key. That
+    is the difference between "future lookups find the shared session" and
+    "the work stranded under the old key becomes visible again".
+    """
+    alias_key = (alias_key or "").strip()
+    canonical_key = (canonical_key or "").strip()
+    if not alias_key or not canonical_key:
+        raise ValueError("both the alias and the canonical workspace key are required")
+    if alias_key == canonical_key:
+        raise ValueError("an alias cannot point at itself")
+
+    conn = connect()
+    try:
+        existing = conn.execute(
+            "SELECT canonical_key FROM workspace_aliases WHERE alias_key = ?",
+            [alias_key],
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"{alias_key} is already an alias for {_col(existing, 'canonical_key')}"
+            )
+        chained = conn.execute(
+            "SELECT canonical_key FROM workspace_aliases WHERE alias_key = ?",
+            [canonical_key],
+        ).fetchone()
+        if chained:
+            raise ValueError(
+                f"{canonical_key} is itself an alias for "
+                f"{_col(chained, 'canonical_key')}; point this one there instead"
+            )
+
+        conn.execute(
+            "INSERT INTO workspace_aliases (alias_key, canonical_key, note) "
+            "VALUES (?, ?, ?)",
+            [alias_key, canonical_key, note],
+        )
+
+        moved: dict[str, int] = {}
+        if migrate_existing:
+            # `open_key` enforces one open session per identity and lane, so
+            # re-filing an open session into a lane that already has one hits
+            # a unique index. Caught here to name the fix, because the raw
+            # error is a duplicate-entry message about a generated column
+            # nobody at the keyboard has heard of.
+            clash = conn.execute(
+                """
+                SELECT a.session_id, a.lane FROM agent_sessions a
+                JOIN agent_sessions b
+                  ON b.agent_id = a.agent_id AND b.operator_id = a.operator_id
+                 AND b.lane = a.lane AND b.workspace_key = ?
+                 AND b.status = 'open' AND b.session_id <> a.session_id
+                WHERE a.workspace_key = ? AND a.status = 'open'
+                LIMIT 1
+                """,
+                [canonical_key, alias_key],
+            ).fetchone()
+            if clash:
+                raise ValueError(
+                    f"session {_col(clash, 'session_id')} is open under the old key "
+                    f"in lane '{_col(clash, 'lane')}', and that lane is already open "
+                    f"under {canonical_key}. Park one of them first, then re-run."
+                )
+
+            for table, pinned in _WORKSPACE_KEYED_TABLES.items():
+                before = conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE workspace_key = ?",
+                    [alias_key],
+                ).fetchone()
+                count = int(_col(before, "n") or 0)
+                if count:
+                    keep = f", {pinned} = {pinned}" if pinned else ""
+                    conn.execute(
+                        f"UPDATE {table} SET workspace_key = ?{keep} "
+                        "WHERE workspace_key = ?",
+                        [canonical_key, alias_key],
+                    )
+                moved[table] = count
+        conn.commit()
+        return {
+            "alias_key": alias_key,
+            "canonical_key": canonical_key,
+            "note": note,
+            "moved": moved,
+        }
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
