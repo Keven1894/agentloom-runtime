@@ -789,3 +789,100 @@ def test_an_empty_title_is_refused():
     """Clearing the title would leave `tree` with nothing to render at all."""
     with pytest.raises(ValueError):
         store.set_session_title("s-1", "   ")
+
+
+# --------------------------------------------------------------------------
+# automatic checkpoints — refreshing state without speaking for a human
+# --------------------------------------------------------------------------
+
+
+def _auto_pack() -> ResumePack:
+    pack = _pack()
+    pack.checkpoint = dict(pack.checkpoint or {})
+    pack.checkpoint["payload"] = dict(store.AUTO_CHECKPOINT_PAYLOAD)
+    return pack
+
+
+def test_an_automatic_checkpoint_says_so_where_the_next_action_is_read():
+    """The safety property the whole feature rests on.
+
+    An automatic checkpoint inherits the next action rather than authoring it.
+    A reader who cannot tell the difference will treat a carried-forward
+    instruction as one a person left them *after* the work that followed it.
+    """
+    text = render_resume_pack(_auto_pack())
+    assert "automation" in text
+    assert "carried forward" in text.lower()
+    assert text.index("automation") < text.index("NEXT ACTION")
+
+
+def test_a_human_checkpoint_carries_no_such_label():
+    """The marker only means something if it is rare."""
+    text = render_resume_pack(_pack())
+    assert "automation" not in text
+    assert "carried forward" not in text.lower()
+
+
+def test_auto_detection_tolerates_a_checkpoint_with_no_payload():
+    assert store.is_auto_checkpoint(None) is False
+    assert store.is_auto_checkpoint({}) is False
+    assert store.is_auto_checkpoint({"payload": None}) is False
+    assert store.is_auto_checkpoint({"payload": {"other": 1}}) is False
+
+
+def test_auto_refuses_to_coexist_with_an_authored_next_action():
+    """--auto and --next are contradictory, not mergeable.
+
+    Silently preferring one of them is how automation ends up overwriting the
+    field it was built never to touch.
+    """
+    import inspect
+
+    from agentloom_runtime.session import cli
+
+    guard = inspect.getsource(cli.cmd_checkpoint)
+    guard = guard[: guard.index("if args.session:")]
+    assert "args.auto and (args.next or args.decision)" in guard
+
+
+def test_auto_carries_the_plan_forward_but_never_the_decisions():
+    """Decisions are append-only events; next action and plan are state.
+
+    Copying a decision into every automatic checkpoint would repeat it once
+    per run in `agentloom-session decisions`, turning the corpus B2 made
+    readable back into noise.
+    """
+    import inspect
+
+    from agentloom_runtime.session import cli
+
+    source = inspect.getsource(cli.cmd_checkpoint)
+    block = source[source.index("if args.auto:") : source.index("# Archive the")]
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "next_action" in code and "open_plan_path" in code
+    assert "decision" not in code, "an inherited decision would be recorded twice"
+
+
+def test_staleness_is_checked_before_the_expensive_work():
+    """Most --if-stale runs do nothing, so that must be the cheap path."""
+    import inspect
+
+    from agentloom_runtime.session import cli
+
+    source = inspect.getsource(cli.cmd_checkpoint)
+    assert source.index("args.if_stale") < source.index("discover_transcripts")
+
+
+def test_checkpoint_age_is_measured_on_the_server():
+    """Same reasoning as the liveness window.
+
+    Subtracting a server-written timestamp from the calling machine's clock
+    makes staleness depend on how well two hosts agree about the time.
+    """
+    import inspect
+
+    source = inspect.getsource(store.hours_since_last_checkpoint)
+    assert "TIMESTAMPDIFF" in source and "NOW(3)" in source
+    assert "datetime" not in source, "no client-side clock in the comparison"

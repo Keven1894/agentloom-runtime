@@ -200,6 +200,12 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
     host = detect_host_context(Path(args.path) if args.path else None)
     workspace_path = Path(args.path) if args.path else Path.cwd()
 
+    if args.auto and (args.next or args.decision):
+        raise SystemExit(
+            "error: --auto carries the last checkpoint's next action forward. "
+            "It cannot also take --next or --decision; drop --auto to author them."
+        )
+
     if args.session:
         session_id = args.session
     else:
@@ -212,6 +218,32 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
             lane=_lane(args),
         )
         session_id = session.session_id
+
+    # Asked before anything expensive: the point of --if-stale is that most
+    # invocations do nothing, so discovering that must cost one SELECT rather
+    # than a transcript read.
+    if args.if_stale is not None:
+        age = store.hours_since_last_checkpoint(session_id)
+        if age is not None and age < args.if_stale:
+            _emit(
+                {"skipped": True, "session_id": session_id, "age_hours": round(age, 2)},
+                f"last checkpoint is {age:.1f}h old; nothing to do",
+                args.json,
+            )
+            return 0
+
+    next_action = args.next
+    open_plan_path = args.plan
+    if args.auto:
+        # Carry the current resume point forward. Decisions are deliberately
+        # not inherited: next action and plan are current-state fields where
+        # the newest row wins, but a decision is an append-only event, and
+        # copying it into every automatic checkpoint would repeat it once per
+        # run in `agentloom-session decisions`.
+        previous = store.list_checkpoints(session_id, limit=1)
+        if previous:
+            next_action = previous[0].get("next_action")
+            open_plan_path = previous[0].get("open_plan_path")
 
     # Archive the conversation this checkpoint belongs to and cite it, so the
     # checkpoint's "what" can always be expanded into the underlying "why".
@@ -227,13 +259,14 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
     vcs = collect_vcs_state(workspace_path) if not args.no_vcs else None
     checkpoint_id = store.checkpoint(
         session_id,
-        next_action=args.next,
-        open_plan_path=args.plan,
+        next_action=next_action,
+        open_plan_path=open_plan_path,
         vcs_head=vcs.head if vcs else None,
         vcs_branch=vcs.branch if vcs else None,
         vcs_status_summary=vcs.status_summary if vcs else None,
         decisions=args.decision or None,
         transcript_citations=citations or None,
+        payload=dict(store.AUTO_CHECKPOINT_PAYLOAD) if args.auto else None,
         host=host,
     )
     lines = [f"checkpoint {checkpoint_id} saved for session {session_id}"]
@@ -848,6 +881,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--decision", action="append", help="a decision made (repeatable)")
     p.add_argument("--cite", action="append", help="external transcript reference (repeatable)")
     p.add_argument("--no-vcs", action="store_true", help="skip working-tree capture")
+    p.add_argument(
+        "--auto",
+        action="store_true",
+        help="refresh working tree and citation only, carrying the last "
+        "checkpoint's next action forward instead of authoring one",
+    )
+    p.add_argument(
+        "--if-stale",
+        type=float,
+        metavar="HOURS",
+        help="do nothing unless the newest checkpoint is older than this",
+    )
     p.add_argument(
         "--no-archive",
         action="store_true",

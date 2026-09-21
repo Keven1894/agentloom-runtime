@@ -140,6 +140,7 @@ agentloom-session whoami       # show resolved identity (debug host neutrality)
 agentloom-session resume       # print the resume pack, and claim this lane
 agentloom-session resume --peek  # the same, without recording this host as active
 agentloom-session checkpoint --next "Apply the migration to dev" --plan docs/plan/x.md
+agentloom-session checkpoint --auto --if-stale 4   # automation: refresh state, never author it
 agentloom-session list         # every session for this identity, with lane and status
 agentloom-session park         # pause; frees this lane's open slot
 agentloom-session title "…"    # correct a session title that no longer describes the work
@@ -260,6 +261,29 @@ requirement as 017 in the other direction — apply it only once every host runs
 code that no longer reads the table, since a host on older code fails its whole
 resume rather than just the turn lookup.
 
+### Who writes a checkpoint
+
+A checkpoint is a person — or an agent acting for one — saying where things
+stand. `--auto` exists so automation can keep the *surrounding facts* current
+without speaking for them: it refreshes the working tree and the transcript
+citation, carries the last `--next` and `--plan` forward unchanged, and refuses
+to run alongside `--next` or `--decision` rather than quietly preferring one.
+
+Two consequences are load-bearing:
+
+- **Decisions are never inherited.** Next action and plan are current-state
+  fields where the newest row wins; a decision is an append-only event, and
+  copying it forward would repeat it once per automatic run in
+  `agentloom-session decisions`.
+- **The row is marked**, via `checkpoint_kind: auto` in `payload_json`, and
+  `resume` labels it where the next action is read. A reader who cannot tell
+  the difference would treat a carried-forward instruction as one a person left
+  them *after* the work that followed it.
+
+`--if-stale HOURS` makes the common invocation a no-op, and answers the
+staleness question server-side so a checkpoint another machine wrote minutes
+ago counts.
+
 ### What is stored
 
 Structured resume state, short summaries, and redacted conversation archives.
@@ -332,6 +356,8 @@ rows with `locale=en` or `locale=es`; they do not replace the original.
 - Keying a lane on a machine instead of on the work stream.
 - Reading `session_hosts` to decide *which* session to resume rather than only to refuse a fork.
 - Forking on `ANOTHER MACHINE IS WORKING HERE`, which parks a live session; take a lane instead.
+- Letting automation author a `--next`, or render an automatic checkpoint as though a person wrote it.
+- Deciding staleness by subtracting a server timestamp from the local clock.
 
 ## Related
 

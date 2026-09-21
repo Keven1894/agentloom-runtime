@@ -55,6 +55,8 @@ __all__ = [
     "compact_embeddings",
     "count_transcripts",
     "index_workspace",
+    "hours_since_last_checkpoint",
+    "is_auto_checkpoint",
     "list_checkpoints",
     "list_decisions",
     "list_transcripts",
@@ -75,6 +77,12 @@ __all__ = [
 ]
 
 CHECKPOINT_SCHEMA_VERSION = 1
+
+# Marks a checkpoint written by automation rather than by a human stopping to
+# say where things stand. Recorded in `payload_json` rather than a column: it
+# changes how the row is *read*, not how it is looked up, and a free-form key
+# costs no migration.
+AUTO_CHECKPOINT_PAYLOAD = {"checkpoint_kind": "auto"}
 
 # How long a machine keeps counting as active in a session after its last
 # recorded activity. The two ways of being wrong are not symmetric: calling a
@@ -682,6 +690,32 @@ def list_checkpoints(session_id: str, limit: int = 10) -> list[dict[str, Any]]:
         return [_checkpoint_from_row(row) for row in rows]
     finally:
         conn.close()
+
+
+def hours_since_last_checkpoint(session_id: str) -> Optional[float]:
+    """Age of the newest checkpoint in hours, or ``None`` if there is none.
+
+    The arithmetic runs server-side for the same reason the liveness window
+    does: comparing a server-written timestamp against the calling machine's
+    clock would make the answer depend on how well two hosts agree about the
+    time, which is the skew this layer exists to tolerate.
+
+    ``None`` means "never checkpointed", which every caller should read as
+    stale rather than as fresh.
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT TIMESTAMPDIFF(MINUTE, MAX(created_at), NOW(3)) AS age_minutes
+            FROM session_checkpoints WHERE session_id = ?
+            """,
+            [session_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    age = _col(row, "age_minutes") if row else None
+    return None if age is None else float(age) / 60.0
 
 
 def list_decisions(
@@ -1975,6 +2009,12 @@ def render_host_switch_banner(switch: Optional[dict[str, Any]]) -> list[str]:
     return _render_handoff_banner(switch)
 
 
+def is_auto_checkpoint(checkpoint: Optional[dict[str, Any]]) -> bool:
+    """Was this checkpoint written by automation rather than by a person?"""
+    payload = (checkpoint or {}).get("payload") or {}
+    return payload.get("checkpoint_kind") == "auto"
+
+
 def _format_idle(hours: int) -> str:
     """Idle time at the coarsest unit that still distinguishes the cases."""
     if hours < 48:
@@ -2041,13 +2081,20 @@ def render_resume_pack(
         origin = " / ".join(x for x in (cp.get("host_hint"), cp.get("ide_hint")) if x)
         if origin:
             lines.append(f"recorded on: {origin}")
+        if is_auto_checkpoint(cp):
+            lines.append("written by:  automation (working tree and citation only)")
         if cp.get("vcs_branch") or cp.get("vcs_head"):
             head = (cp.get("vcs_head") or "")[:12]
             lines.append(f"vcs:         {cp.get('vcs_branch') or '?'} @ {head or '?'}")
         if cp.get("open_plan_path"):
             lines.append(f"open plan:   {cp['open_plan_path']}")
         if cp.get("next_action"):
-            lines += ["", "NEXT ACTION:", f"  {cp['next_action']}"]
+            # An automatic checkpoint inherits this field rather than authoring
+            # it. Saying so is the whole safety property: a reader must never
+            # mistake a carried-forward instruction for one a person left them
+            # after the work that followed it.
+            carried = " (carried forward, not re-authored)" if is_auto_checkpoint(cp) else ""
+            lines += ["", f"NEXT ACTION:{carried}", f"  {cp['next_action']}"]
         decisions = cp.get("decisions") or []
         if decisions:
             lines += ["", "decisions:"]
