@@ -134,6 +134,8 @@ def test_lexical_search_never_selects_the_embedding_column():
     measured at 12.8 s of a 13 s search, against 115 ms of actual ranking.
     Nothing about the result changed, which is why it went unnoticed.
     """
+    store._fulltext_index_present = None
+    store._search_fallback_warned = False
     captured: list[str] = []
 
     class _Conn:
@@ -160,6 +162,109 @@ def test_lexical_search_never_selects_the_embedding_column():
             "anything", workspace_key="github.com/acme/repo", query_vec=[0.1, 0.2]
         )
     assert "embedding_f32" in captured[0], "vector search must request the vectors"
+
+
+def _reset_fulltext_probe() -> None:
+    store._fulltext_index_present = None
+    store._search_fallback_warned = False
+
+
+class _SearchConn:
+    def __init__(self, rows=None, fail_match: bool = False):
+        self.sql: list[str] = []
+        self.rows = rows if rows is not None else []
+        self.fail_match = fail_match
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        if self.fail_match and "MATCH" in sql:
+            raise RuntimeError(1191, "Can't find FULLTEXT index matching the column list")
+        return self
+
+    def fetchall(self):
+        return self.rows
+
+    def close(self):
+        pass
+
+
+def _chunk_row() -> dict:
+    return {
+        "chunk_id": "c-1",
+        "transcript_id": "t-1",
+        "workspace_key": "github.com/acme/repo",
+        "source_host": "cursor",
+        "source_ref": "abc",
+        "granularity": "window",
+        "locale": "en",
+        "seq_start": 1,
+        "seq_end": 2,
+        "captured_at": None,
+        "content": "session memory lives in MySQL",
+        "ft_score": 1.0,
+    }
+
+
+def test_fulltext_candidate_sql_is_bounded_natural_language(monkeypatch):
+    monkeypatch.setenv("AGENTLOOM_SEARCH_FULLTEXT", "1")
+    _reset_fulltext_probe()
+    conn = _SearchConn(rows=[_chunk_row()])
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        hits = store.search_archive("session memory", workspace_key="github.com/acme/repo")
+    assert hits, "a MATCH that returns a row is the result"
+    assert len(conn.sql) == 1, "a non-empty MATCH must not fall back to a scan"
+    sql = conn.sql[0]
+    assert "MATCH (content) AGAINST (? IN NATURAL LANGUAGE MODE)" in sql
+    assert "LIMIT ?" in sql
+    assert "embedding" not in sql
+
+
+def test_empty_fulltext_match_falls_back_to_the_scan(monkeypatch):
+    """Emptiness is what falls back, not a short query string.
+
+    ``ab`` is under the server's minimum token size. The ranker still asks the
+    index. Only an empty MATCH, or a missing index, scans the workspace.
+    """
+    monkeypatch.setenv("AGENTLOOM_SEARCH_FULLTEXT", "1")
+    _reset_fulltext_probe()
+    conn = _SearchConn(rows=[])
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        store.search_archive("ab", workspace_key="github.com/acme/repo")
+    assert "MATCH" in conn.sql[0]
+    assert "NATURAL LANGUAGE MODE" in conn.sql[0]
+    assert "MATCH" not in conn.sql[1]
+
+
+def test_a_missing_fulltext_index_is_remembered(monkeypatch):
+    """Errno 1191 means migration 020 is not applied yet.
+
+    The next query in this process must not try MATCH again. Retrying a
+    statement that cannot succeed is how a fallback becomes the hot path.
+    """
+    monkeypatch.setenv("AGENTLOOM_SEARCH_FULLTEXT", "1")
+    _reset_fulltext_probe()
+    conn = _SearchConn(fail_match=True)
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        store.search_archive("session memory", workspace_key="github.com/acme/repo")
+        store.search_archive("redaction of secrets", workspace_key="github.com/acme/repo")
+    match_statements = [sql for sql in conn.sql if "MATCH" in sql]
+    assert len(match_statements) == 1
+    assert store._fulltext_index_present is False
+
+
+def test_fulltext_stays_off_until_the_recall_gate_passes(monkeypatch):
+    """Cap 400 and cap 800 both missed the recall gate on 2026-09-22.
+
+    The index is allowed to exist. Search must keep scanning until a candidate
+    set is shown to keep the hits the baseline recorded.
+    """
+    monkeypatch.delenv("AGENTLOOM_SEARCH_FULLTEXT", raising=False)
+    _reset_fulltext_probe()
+    conn = _SearchConn(rows=[])
+    with patch("agentloom_runtime.session.store.connect", return_value=conn):
+        store.search_archive("session memory", workspace_key="github.com/acme/repo")
+    assert conn.sql
+    assert "MATCH" not in conn.sql[0]
 
 
 def test_reindex_tests_for_a_vector_rather_than_selecting_it():

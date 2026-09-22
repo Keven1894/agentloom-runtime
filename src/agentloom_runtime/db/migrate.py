@@ -87,6 +87,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration("017_session_lane_identity.sql", "session", "lane joins the open-session key"),
     Migration("018_drop_session_turns.sql", "session", "retire the unused turn-summary table"),
     Migration("019_workspace_aliases.sql", "session", "remap a workspace key when a remote moves"),
+    Migration("020_session_transcript_chunk_fulltext.sql", "session", "full-text candidate index on archive chunks"),
 )
 
 

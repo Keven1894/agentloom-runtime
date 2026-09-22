@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import uuid
 import zlib
 from dataclasses import asdict, dataclass, field
@@ -1987,6 +1988,141 @@ def index_workspace(
     return totals
 
 
+# Rows MATCH may return before hybrid ranking. Common tokens hit about a tenth
+# of the archive, so an uncapped MATCH only moves the scan. Override with
+# AGENTLOOM_SEARCH_CANDIDATES when a recall gate has to be re-measured.
+DEFAULT_SEARCH_CANDIDATES = 400
+
+# MySQL: Can't find FULLTEXT index matching the column list.
+_MISSING_FULLTEXT_ERRNO = 1191
+
+# None: not yet known. True: migration 020 is present. False: this process
+# already saw errno 1191, so later queries skip MATCH instead of failing and
+# falling back on every call.
+_fulltext_index_present: Optional[bool] = None
+_search_fallback_warned = False
+
+
+def _search_candidate_cap() -> int:
+    import os
+
+    raw = os.environ.get("AGENTLOOM_SEARCH_CANDIDATES")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_SEARCH_CANDIDATES
+
+
+def _missing_fulltext(exc: BaseException) -> bool:
+    args = getattr(exc, "args", ())
+    return bool(args) and args[0] == _MISSING_FULLTEXT_ERRNO
+
+
+def _note_search_fallback(reason: str) -> None:
+    """One line per process. A fallback on every query would bury the cause."""
+    global _search_fallback_warned
+    if _search_fallback_warned:
+        return
+    _search_fallback_warned = True
+    print(f"[search] {reason}; scanning the workspace", file=sys.stderr)
+
+
+def _chunk_select(vector_columns: str, where: str, match: bool) -> str:
+    """One SELECT for archive chunks.
+
+    ``match`` adds the full-text predicate and the candidate cap. The SELECT
+    list and the WHERE clause each carry one ``AGAINST`` placeholder, in that
+    order, then ``LIMIT``. Callers pass the query string twice.
+    """
+    score = ""
+    tail = ""
+    if match:
+        score = ", MATCH (content) AGAINST (? IN NATURAL LANGUAGE MODE) AS ft_score"
+        where = f"{where} AND MATCH (content) AGAINST (? IN NATURAL LANGUAGE MODE)"
+        tail = " ORDER BY ft_score DESC LIMIT ?"
+    where_sql = f"WHERE {where}" if where else ""
+    return f"""
+        SELECT chunk_id, transcript_id, workspace_key, source_host, source_ref,
+               granularity, locale, seq_start, seq_end, captured_at, content{vector_columns}{score}
+        FROM session_transcript_chunks
+        {where_sql}{tail}
+    """
+
+
+def _scan_chunks(
+    conn: Any, vector_columns: str, where: str, params: list[Any]
+) -> list[Any]:
+    return conn.execute(
+        _chunk_select(vector_columns, where, match=False),
+        params,
+    ).fetchall()
+
+
+def _fulltext_requested() -> bool:
+    """The candidate path is opt-in until the recall gate passes.
+
+    Latency at cap 400 and cap 800 beat the gates (lexical ~80 ms, hybrid
+    ~150 ms). Recall did not: fewer than 3 of each probe's previous top-5
+    chunk ids survived in the new top 20. Shipping that as the default would
+    make search faster by answering a different question.
+    """
+    import os
+
+    return os.environ.get("AGENTLOOM_SEARCH_FULLTEXT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _load_search_rows(
+    clauses: list[str],
+    params: list[Any],
+    vector_columns: str,
+    *,
+    query: str,
+    workspace_key: Optional[str],
+) -> list[Any]:
+    """Candidate rows for one search.
+
+    With a workspace key, try the full-text index first and keep at most the
+    candidate cap. An empty MATCH, or errno 1191 because migration 020 is not
+    applied yet, falls back to the unfiltered scan. Once 1191 has been seen,
+    later queries in this process skip MATCH.
+    """
+    global _fulltext_index_present
+
+    where = " AND ".join(clauses)
+    conn = connect()
+    try:
+        if (
+            workspace_key
+            and _fulltext_requested()
+            and _fulltext_index_present is not False
+        ):
+            match_params = [query, *params, query, _search_candidate_cap()]
+            try:
+                rows = conn.execute(
+                    _chunk_select(vector_columns, where, match=True),
+                    match_params,
+                ).fetchall()
+            except Exception as exc:
+                if not _missing_fulltext(exc):
+                    raise
+                _fulltext_index_present = False
+                _note_search_fallback("full-text index is not available")
+            else:
+                _fulltext_index_present = True
+                if rows:
+                    return rows
+                _note_search_fallback("full-text match returned nothing")
+        return _scan_chunks(conn, vector_columns, where, params)
+    finally:
+        conn.close()
+
+
 def search_archive(
     query: str,
     *,
@@ -2012,30 +2148,11 @@ def search_archive(
     if model:
         clauses.append("embedding_model = ?")
         params.append(model)
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    # Only pay for vectors when something will rank with them. Selecting the
-    # embedding column unconditionally made a lexical-only query transfer and
-    # parse every vector in the workspace: measured at 12.8 s of a 13 s search,
-    # against 115 ms of actual ranking.
-    #
-    # This never names the legacy JSON column, so it keeps working after 009
-    # drops it. Rows predating the compact format are filled in afterwards.
     vector_columns = ", embedding_f32, embedding_dim" if query_vec else ""
-
-    conn = connect()
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT chunk_id, transcript_id, workspace_key, source_host, source_ref,
-                   granularity, locale, seq_start, seq_end, captured_at, content{vector_columns}
-            FROM session_transcript_chunks
-            {where}
-            """,
-            params,
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = _load_search_rows(
+        clauses, params, vector_columns, query=query, workspace_key=workspace_key
+    )
 
     items: list[dict[str, Any]] = []
     for row in rows:

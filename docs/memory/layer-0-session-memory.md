@@ -356,6 +356,21 @@ vector RRF. Time is a filter (`--since`), not something cosine is asked to
 encode. Tool-call noise is not embedded. Translated overlays are additional
 rows with `locale=en` or `locale=es`; they do not replace the original.
 
+### How search chooses rows
+
+Migration 020 adds a full-text index on `session_transcript_chunks.content`.
+Search does not use it unless `AGENTLOOM_SEARCH_FULLTEXT=1`. With the flag,
+`MATCH … AGAINST` in natural-language mode returns at most
+`AGENTLOOM_SEARCH_CANDIDATES` rows (default 400) and vector comparison runs on
+that set. An empty match, or a database that has not applied 020, scans the
+workspace instead.
+
+The flag stays off because the 2026-09-22 gates split. Latency passed at both
+cap 400 (lexical median 76 ms, hybrid 148 ms) and cap 800 (96 ms and 175 ms),
+against baselines of 1,458 ms and 6,033 ms. Recall did not: fewer than 3 of
+each probe's previous hybrid top-5 chunk ids appeared in the new top 20.
+A capped index that drops those hits is a different search, not a faster one.
+
 ## Anti-patterns
 
 - Opening the editor's private chat database, in either direction, to move sessions between machines.
@@ -375,6 +390,7 @@ rows with `locale=en` or `locale=es`; they do not replace the original.
 - Deciding staleness by subtracting a server timestamp from the local clock.
 - Chaining workspace aliases, or resolving them anywhere but the identity path.
 - Re-filing rows under a new workspace key without pinning `ON UPDATE` columns.
+- Adding a full-text index and then reading every matching row. The cap is what makes it an index. A cap that fails the recall gate is not turned on by default.
 
 ## Related
 
