@@ -1064,6 +1064,52 @@ def test_auto_carries_the_plan_forward_but_never_the_decisions():
     assert "decision" not in code, "an inherited decision would be recorded twice"
 
 
+def test_a_superseded_checkpoint_marks_its_decisions():
+    class _Conn:
+        def execute(self, sql, params=None):
+            return self
+
+        def fetchall(self):
+            return [
+                {
+                    "checkpoint_id": "cp-new",
+                    "session_id": "s",
+                    "created_at": None,
+                    "host_hint": "h",
+                    "decisions_json": json.dumps(["Use the channel search"]),
+                    "payload_json": json.dumps({"supersedes": ["cp-old"]}),
+                },
+                {
+                    "checkpoint_id": "cp-old",
+                    "session_id": "s",
+                    "created_at": None,
+                    "host_hint": "h",
+                    "decisions_json": json.dumps(["Use the FULLTEXT candidate path"]),
+                    "payload_json": None,
+                },
+            ]
+
+        def close(self):
+            pass
+
+    with patch("agentloom_runtime.session.store.connect", return_value=_Conn()):
+        rows = store.list_decisions("s")
+    by_text = {row["decision"]: row for row in rows}
+    assert by_text["Use the FULLTEXT candidate path"]["superseded_by"] == "cp-new"
+    assert by_text["Use the channel search"]["superseded_by"] is None
+
+
+def test_checkpoint_payload_records_supersedes_and_keeps_auto():
+    import argparse
+
+    from agentloom_runtime.session import cli
+
+    args = argparse.Namespace(auto=False, supersedes=["cp-1", " "])
+    assert cli._checkpoint_payload(args) == {"supersedes": ["cp-1"]}
+    args = argparse.Namespace(auto=True, supersedes=None)
+    assert cli._checkpoint_payload(args) == dict(store.AUTO_CHECKPOINT_PAYLOAD)
+
+
 def test_staleness_is_checked_before_the_expensive_work():
     """Most --if-stale runs do nothing, so that must be the cheap path."""
     import inspect

@@ -371,6 +371,20 @@ against baselines of 1,458 ms and 6,033 ms. Recall did not: fewer than 3 of
 each probe's previous hybrid top-5 chunk ids appeared in the new top 20.
 A capped index that drops those hits is a different search, not a faster one.
 
+`AGENTLOOM_SEARCH_MODE=channels` (2026-09-26) runs the two halves
+independently. The lexical channel is `MATCH` on `content`, plus `MATCH` on the
+n-gram-indexed `content_cjk` (migration 021) when the query has CJK text, each
+capped at 100 rows. The dense channel is exact cosine over a per-host sidecar
+(`~/.agentloom/index/<hash>/`, float32 matrix plus ids and a watermark) at
+depth 100, across every locale. The two id lists are fused with RRF and
+collapsed to one pointer per transcript. The sidecar re-syncs by
+`(chunk_id, content_sha256)` diff and checks the server at most every
+`AGENTLOOM_SIDECAR_CHECK_SECONDS` (600). Measured on 33,126 chunks: lexical
+83–93 ms, hybrid 169–197 ms warm, and a Spanish-only query returns `es` rows.
+Search stays on the scan by default until the labeled quality gate in the
+unified retrieval plan passes. The old 2026-09-22 gate compared against the
+previous ranker's top 5, which is overlap, not relevance, and is no longer used.
+
 ## Anti-patterns
 
 - Opening the editor's private chat database, in either direction, to move sessions between machines.
@@ -391,6 +405,8 @@ A capped index that drops those hits is a different search, not a faster one.
 - Chaining workspace aliases, or resolving them anywhere but the identity path.
 - Re-filing rows under a new workspace key without pinning `ON UPDATE` columns.
 - Adding a full-text index and then reading every matching row. The cap is what makes it an index. A cap that fails the recall gate is not turned on by default.
+- Letting one channel filter the other. Scoring vectors only on full-text hits drops every overlay that shares no word with the question.
+- Gating a new ranker on overlap with the old ranker's results. Gate on labeled relevance.
 
 ## Related
 

@@ -30,11 +30,9 @@ PROTOCOL_VERSION = "2024-11-05"
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "session_search",
-        "description": (
-            "Search archived conversations in AgentLoom Layer 0 session memory using "
-            "hybrid lexical and vector search. Returns matching turn snippets and pointers "
-            "(source_ref, seq) that can be inspected with session_get_context."
-        ),
+        # retrieval-catalog:begin tool:session_search
+        "description": "What was said in past Builder sessions. Hybrid search over the redacted transcript archive. Builder-only: the Envita MCP server does not search this store.",
+        # retrieval-catalog:end tool:session_search
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -99,10 +97,9 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "session_get_checkpoint",
-        "description": (
-            "Retrieve the latest checkpoint (or specific session checkpoints) including "
-            "next actions, open plan, and key decisions for a session or current workspace."
-        ),
+        # retrieval-catalog:begin tool:session_get_checkpoint
+        "description": "Where this repository's session left off: the last checkpoint, the open plan, and the next action.",
+        # retrieval-catalog:end tool:session_get_checkpoint
         "inputSchema": {
             "type": "object",
             "properties": {

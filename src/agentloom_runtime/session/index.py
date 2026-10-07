@@ -45,7 +45,9 @@ __all__ = [
     "apply_turn_overlay",
     "chunk_document",
     "decode_vector",
+    "cjk_runs",
     "encode_vector",
+    "fuse_channels",
     "hybrid_rank",
     "lexical_rank",
     "prose_turns",
@@ -245,6 +247,18 @@ def tokenize_query(query: str) -> list[str]:
     return out
 
 
+_CJK_RUN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+")
+
+
+def cjk_runs(text: str) -> str:
+    """CJK runs only, space-separated. Feeds the n-gram full-text index.
+
+    The default InnoDB parser does not split Chinese into words, so a
+    Chinese question would match nothing there.
+    """
+    return " ".join(_CJK_RUN.findall(text or ""))
+
+
 def lexical_rank(query: str, items: list[tuple[str, str]]) -> list[tuple[str, float]]:
     """Substring coverage. Paths, error strings, and CJK phrases all hit this."""
     tokens = tokenize_query(query)
@@ -369,7 +383,41 @@ def hybrid_rank(
 
     fused = reciprocal_rank_fusion(lists, rrf_k=rrf_k)
     by_id = {item["id"]: item for item in items}
+    mode = "hybrid" if query_vec else "lexical"
+    return _collapse_transcripts(fused, by_id, limit=limit, search_mode=mode)
 
+
+def fuse_channels(
+    items: list[dict[str, Any]],
+    lexical_ids: list[str],
+    dense_ids: list[str],
+    *,
+    limit: int = 8,
+    rrf_k: int = DEFAULT_RRF_K,
+) -> list[dict[str, Any]]:
+    """Fuse two independently ranked id lists, then keep one pointer per transcript.
+
+    Neither list filters the other: a chunk found only by the dense channel,
+    for example a Spanish overlay with no word in common with the query,
+    is ranked on the same terms as a lexical hit.
+    """
+    lists: list[list[tuple[str, dict[str, Any]]]] = [
+        [(key, {"mode": "lexical"}) for key in lexical_ids],
+        [(key, {"mode": "vector"}) for key in dense_ids],
+    ]
+    fused = reciprocal_rank_fusion(lists, rrf_k=rrf_k)
+    by_id = {item["id"]: item for item in items}
+    mode = "hybrid" if dense_ids else "lexical"
+    return _collapse_transcripts(fused, by_id, limit=limit, search_mode=mode)
+
+
+def _collapse_transcripts(
+    fused: list[tuple[str, float, dict[str, Any]]],
+    by_id: dict[str, dict[str, Any]],
+    *,
+    limit: int,
+    search_mode: str,
+) -> list[dict[str, Any]]:
     # Collapse session+window for the same transcript: keep the best window,
     # or the session node if no window ranked. One pointer per conversation.
     best_for_transcript: dict[str, tuple[str, float, dict[str, Any]]] = {}
@@ -402,7 +450,7 @@ def hybrid_rank(
         item = dict(by_id[key])
         modes = {payload.get("mode", "hybrid")}
         item["score"] = score
-        item["search_mode"] = "hybrid" if query_vec else "lexical"
+        item["search_mode"] = search_mode
         item["_modes"] = modes
         results.append(item)
     return results

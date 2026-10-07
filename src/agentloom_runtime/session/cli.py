@@ -269,7 +269,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         vcs_status_summary=vcs.status_summary if vcs else None,
         decisions=args.decision or None,
         transcript_citations=citations or None,
-        payload=dict(store.AUTO_CHECKPOINT_PAYLOAD) if args.auto else None,
+        payload=_checkpoint_payload(args),
         host=host,
     )
     lines = [f"checkpoint {checkpoint_id} saved for session {session_id}"]
@@ -431,6 +431,19 @@ def cmd_compact(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_cjk(args: argparse.Namespace) -> int:
+    _, _, workspace_key = _identity(args)
+    stats = store.backfill_content_cjk(
+        workspace_key=None if args.all_workspaces else workspace_key
+    )
+    _emit(
+        stats,
+        f"filled content_cjk for {stats['updated']} chunk(s), {stats['scanned']} scanned",
+        args.json,
+    )
+    return 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     _, _, workspace_key = _identity(args)
     from agentloom_runtime.memory.embedding_provider import embed_query, get_embedding_model
@@ -511,6 +524,14 @@ def cmd_checkpoints(args: argparse.Namespace) -> int:
     return 0
 
 
+def _checkpoint_payload(args: argparse.Namespace) -> Optional[dict]:
+    payload = dict(store.AUTO_CHECKPOINT_PAYLOAD) if args.auto else {}
+    supersedes = [item.strip() for item in (getattr(args, "supersedes", None) or []) if item.strip()]
+    if supersedes:
+        payload["supersedes"] = supersedes
+    return payload or None
+
+
 def cmd_decisions(args: argparse.Namespace) -> int:
     session_id = _resolve_session_id(args)
     rows = store.list_decisions(
@@ -519,6 +540,7 @@ def cmd_decisions(args: argparse.Namespace) -> int:
     lines = [
         f"{(item['created_at'] or '')[:10]}  {str(item['session_id'])[:8]}..  "
         f"{item['decision']}"
+        + (f"  (superseded by {item['superseded_by'][:8]})" if item.get("superseded_by") else "")
         for item in rows
     ]
     _emit(rows, "\n".join(lines) or "No decisions recorded yet.", args.json)
@@ -815,6 +837,26 @@ def _doctor_checks(args: argparse.Namespace) -> list[tuple[str, str, str]]:
     except Exception as exc:  # noqa: BLE001
         checks.append(("embeddings", "warn", f"unavailable; search is lexical-only ({exc})"))
 
+    try:
+        from agentloom_runtime.db import connect as _connect
+        from agentloom_runtime.memory.embedding_provider import get_embedding_model
+        from agentloom_runtime.session.sidecar import VectorSidecar
+
+        if "workspace_key" in locals():
+            sidecar_status = VectorSidecar(
+                workspace_key, get_embedding_model(), connect=_connect
+            ).status()
+            lag = sidecar_status.server_rows - sidecar_status.rows
+            checks.append((
+                "vector sidecar",
+                "ok" if sidecar_status.in_sync else "warn",
+                f"{sidecar_status.rows} local / {sidecar_status.server_rows} server rows"
+                + ("" if sidecar_status.in_sync else f", {lag:+d} to sync on next search")
+                + f" ({sidecar_status.path})",
+            ))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("vector sidecar", "warn", f"not checked ({exc})"))
+
     from agentloom_runtime.session.readers import READERS
 
     root = Path(args.path) if args.path else Path.cwd()
@@ -912,6 +954,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next", help="the next action for whoever resumes")
     p.add_argument("--plan", help="path to the plan or document being worked on")
     p.add_argument("--decision", action="append", help="a decision made (repeatable)")
+    p.add_argument(
+        "--supersedes",
+        action="append",
+        metavar="CHECKPOINT_ID",
+        help="an earlier checkpoint whose decisions this one replaces (repeatable)",
+    )
     p.add_argument("--cite", action="append", help="external transcript reference (repeatable)")
     p.add_argument("--no-vcs", action="store_true", help="skip working-tree capture")
     p.add_argument(
@@ -985,6 +1033,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="convert every workspace, not only the current one",
     )
     p.set_defaults(func=cmd_compact)
+
+    p = sub.add_parser(
+        "backfill-cjk", help="fill the CJK full-text column for rows indexed before migration 021"
+    )
+    _add_common(p)
+    p.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help="fill every workspace, not only the current one",
+    )
+    p.set_defaults(func=cmd_backfill_cjk)
 
     p = sub.add_parser("search", help="find archived conversations by what was said")
     _add_common(p)

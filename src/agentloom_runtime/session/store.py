@@ -30,8 +30,10 @@ from agentloom_runtime.session.index import (
     ArchiveHit,
     apply_turn_overlay,
     chunk_document,
+    cjk_runs,
     decode_vector,
     encode_vector,
+    fuse_channels,
     hybrid_rank,
     snippet as make_snippet,
 )
@@ -932,9 +934,10 @@ def list_decisions(
     try:
         rows = conn.execute(
             f"""
-            SELECT checkpoint_id, session_id, created_at, host_hint, decisions_json
+            SELECT checkpoint_id, session_id, created_at, host_hint, decisions_json, payload_json
             FROM session_checkpoints
-            WHERE session_id IN ({placeholders}) AND decisions_json IS NOT NULL
+            WHERE session_id IN ({placeholders})
+              AND (decisions_json IS NOT NULL OR payload_json LIKE '%supersedes%')
             ORDER BY created_at DESC, checkpoint_id DESC
             LIMIT ?
             """,
@@ -943,16 +946,25 @@ def list_decisions(
     finally:
         conn.close()
 
+    # Newest first, so a superseding checkpoint is seen before the one it replaces.
+    superseded_by: dict[str, str] = {}
+    for row in rows:
+        payload = _from_json(_col(row, "payload_json")) or {}
+        for old in (payload.get("supersedes") or []) if isinstance(payload, dict) else []:
+            superseded_by.setdefault(str(old), _col(row, "checkpoint_id"))
+
     out: list[dict[str, Any]] = []
     for row in rows:
+        checkpoint_id = _col(row, "checkpoint_id")
         for text in _from_json(_col(row, "decisions_json")) or []:
             out.append(
                 {
                     "decision": text,
-                    "checkpoint_id": _col(row, "checkpoint_id"),
+                    "checkpoint_id": checkpoint_id,
                     "session_id": _col(row, "session_id"),
                     "created_at": _iso(_col(row, "created_at")),
                     "host_hint": _col(row, "host_hint"),
+                    "superseded_by": superseded_by.get(checkpoint_id),
                 }
             )
             if len(out) >= limit:
@@ -1696,6 +1708,57 @@ def _has_legacy_embedding_column() -> bool:
         conn.close()
 
 
+@lru_cache(maxsize=None)
+def _has_cjk_column() -> bool:
+    """Whether migration 021 added ``content_cjk``. Cached like the legacy probe."""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "  AND table_name = 'session_transcript_chunks' "
+            "  AND column_name = 'content_cjk'"
+        ).fetchone()
+        return bool(row and int(row["n"]))
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def backfill_content_cjk(*, workspace_key: Optional[str] = None, batch_size: int = 500) -> dict[str, int]:
+    """Fill ``content_cjk`` for rows written before migration 021."""
+    stats = {"scanned": 0, "updated": 0}
+    if not _has_cjk_column():
+        return stats
+    where = "content_cjk IS NULL"
+    params: list[Any] = []
+    if workspace_key:
+        where += " AND workspace_key = ?"
+        params.append(workspace_key)
+    conn = connect()
+    try:
+        while True:
+            rows = conn.execute(
+                f"SELECT chunk_id, content FROM session_transcript_chunks "
+                f"WHERE {where} LIMIT {int(batch_size)}",
+                params,
+            ).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                stats["scanned"] += 1
+                conn.execute(
+                    "UPDATE session_transcript_chunks SET content_cjk = ? WHERE chunk_id = ?",
+                    [cjk_runs(row["content"] or ""), row["chunk_id"]],
+                )
+                stats["updated"] += 1
+            conn.commit()
+    finally:
+        conn.close()
+    return stats
+
+
 def _fill_legacy_embeddings(items: list[dict[str, Any]]) -> None:
     """Supply vectors for rows that predate the compact format.
 
@@ -1849,14 +1912,34 @@ def index_transcript(
                 continue
 
             chunk_id = prev["chunk_id"] if prev else str(uuid.uuid4())
+            cjk_insert = ", content_cjk" if _has_cjk_column() else ""
+            cjk_value = ", ?" if cjk_insert else ""
+            cjk_update = ",\n                    content_cjk = VALUES(content_cjk)" if cjk_insert else ""
+            params = [
+                chunk_id,
+                transcript_id,
+                workspace_key,
+                source_host,
+                source_ref,
+                chunk.granularity,
+                chunk.locale,
+                chunk.seq_start,
+                chunk.seq_end,
+                captured_at,
+                chunk.content,
+                chunk.content_sha256,
+                model,
+            ]
+            if cjk_insert:
+                params.append(cjk_runs(chunk.content))
             conn.execute(
-                """
+                f"""
                 INSERT INTO session_transcript_chunks
                     (chunk_id, transcript_id, workspace_key, source_host, source_ref,
                      granularity, locale, seq_start, seq_end, captured_at, content,
                      content_sha256, embedding_f32, embedding_dim,
-                     embedding_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                     embedding_model{cjk_insert})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?{cjk_value})
                 ON DUPLICATE KEY UPDATE
                     workspace_key = VALUES(workspace_key),
                     source_host = VALUES(source_host),
@@ -1865,23 +1948,9 @@ def index_transcript(
                     content = VALUES(content),
                     content_sha256 = VALUES(content_sha256),
                     embedding_f32 = NULL,
-                    embedding_dim = NULL
+                    embedding_dim = NULL{cjk_update}
                 """,
-                [
-                    chunk_id,
-                    transcript_id,
-                    workspace_key,
-                    source_host,
-                    source_ref,
-                    chunk.granularity,
-                    chunk.locale,
-                    chunk.seq_start,
-                    chunk.seq_end,
-                    captured_at,
-                    chunk.content,
-                    chunk.content_sha256,
-                    model,
-                ],
+                params,
             )
             to_embed.append((chunk_id, chunk.content))
 
@@ -2123,6 +2192,159 @@ def _load_search_rows(
         conn.close()
 
 
+CHANNEL_DEPTH = 100
+_CHANNEL_COLUMNS = (
+    "chunk_id, transcript_id, workspace_key, source_host, source_ref, "
+    "granularity, locale, seq_start, seq_end, captured_at, content"
+)
+
+
+def _search_mode() -> str:
+    """``channels`` runs lexical and dense independently. Default is the scan.
+
+    The channel path is measured against labeled relevance before it becomes
+    the default (unified memory retrieval plan, G-quality).
+    """
+    import os
+
+    raw = os.environ.get("AGENTLOOM_SEARCH_MODE", "").strip().lower()
+    return "channels" if raw == "channels" else "scan"
+
+
+def _lexical_channel(
+    conn: Any,
+    column: str,
+    text: str,
+    clauses: list[str],
+    params: list[Any],
+) -> list[str]:
+    where = " AND ".join([*clauses, f"MATCH ({column}) AGAINST (? IN NATURAL LANGUAGE MODE)"])
+    rows = conn.execute(
+        f"SELECT chunk_id, MATCH ({column}) AGAINST (? IN NATURAL LANGUAGE MODE) AS ft_score "
+        f"FROM session_transcript_chunks WHERE {where} "
+        "ORDER BY ft_score DESC LIMIT ?",
+        [text, *params, text, CHANNEL_DEPTH],
+    ).fetchall()
+    return [row["chunk_id"] for row in rows]
+
+
+def _search_channels(
+    query: str,
+    *,
+    workspace_key: str,
+    since: Optional[str],
+    limit: int,
+    query_vec: Optional[list[float]],
+    model: Optional[str],
+) -> Optional[list[ArchiveHit]]:
+    """Lexical and dense candidates, each at depth 100, fused per transcript.
+
+    Returns ``None`` when the full-text index is missing so the caller scans.
+    """
+    from agentloom_runtime.session.sidecar import VectorSidecar
+
+    clauses = ["workspace_key = ?"]
+    params: list[Any] = [workspace_key]
+    if since:
+        clauses.append("captured_at >= ?")
+        params.append(since)
+    if model:
+        clauses.append("embedding_model = ?")
+        params.append(model)
+
+    conn = connect()
+    try:
+        try:
+            lexical_ids = _lexical_channel(conn, "content", query, clauses, params)
+        except Exception as exc:
+            if _missing_fulltext(exc):
+                _note_search_fallback("full-text index is not available")
+                return None
+            raise
+        cjk_ids: list[str] = []
+        cjk_query = cjk_runs(query)
+        if cjk_query and _has_cjk_column():
+            try:
+                cjk_ids = _lexical_channel(conn, "content_cjk", cjk_query, clauses, params)
+            except Exception as exc:
+                if not _missing_fulltext(exc):
+                    raise
+    finally:
+        conn.close()
+
+    dense_ids: list[str] = []
+    if query_vec and not model:
+        from agentloom_runtime.memory.embedding_provider import get_embedding_model
+
+        model = get_embedding_model()
+    if query_vec and model:
+        sidecar = VectorSidecar(workspace_key, model, connect=connect)
+        sidecar.ensure_synced()
+        dense_ids = [cid for cid, _ in sidecar.search(query_vec, limit=CHANNEL_DEPTH, since=since)]
+
+    lexical_merged = list(lexical_ids)
+    for cid in cjk_ids:
+        if cid not in lexical_merged:
+            lexical_merged.append(cid)
+    wanted = list(dict.fromkeys([*lexical_merged, *dense_ids]))
+    if not wanted:
+        return []
+
+    conn = connect()
+    try:
+        rows: list[Any] = []
+        for start in range(0, len(wanted), 500):
+            batch = wanted[start : start + 500]
+            placeholders = ",".join("?" * len(batch))
+            rows.extend(
+                conn.execute(
+                    f"SELECT {_CHANNEL_COLUMNS} FROM session_transcript_chunks "
+                    f"WHERE chunk_id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+            )
+    finally:
+        conn.close()
+
+    items = [
+        {
+            "id": row["chunk_id"],
+            "transcript_id": row["transcript_id"],
+            "workspace_key": row["workspace_key"],
+            "source_host": row["source_host"],
+            "source_ref": row["source_ref"],
+            "granularity": row["granularity"],
+            "locale": row.get("locale") or "original",
+            "seq_start": int(row["seq_start"]),
+            "seq_end": int(row["seq_end"]),
+            "captured_at": _iso(row["captured_at"]),
+            "content": row["content"] or "",
+        }
+        for row in rows
+    ]
+    ranked = fuse_channels(items, lexical_merged, dense_ids, limit=limit)
+    return [_archive_hit(item, query) for item in ranked]
+
+
+def _archive_hit(item: dict[str, Any], query: str) -> ArchiveHit:
+    return ArchiveHit(
+        chunk_id=item["id"],
+        transcript_id=item["transcript_id"],
+        source_host=item["source_host"],
+        source_ref=item["source_ref"],
+        workspace_key=item["workspace_key"],
+        granularity=item["granularity"],
+        locale=item.get("locale") or "original",
+        seq_start=item["seq_start"],
+        seq_end=item["seq_end"],
+        captured_at=item.get("captured_at"),
+        score=float(item["score"]),
+        snippet=make_snippet(item.get("content") or "", query),
+        search_mode=item.get("search_mode", "hybrid"),
+        content=item.get("content") or "",
+    )
+
+
 def search_archive(
     query: str,
     *,
@@ -2136,6 +2358,18 @@ def search_archive(
     query = (query or "").strip()
     if not query:
         return []
+
+    if workspace_key and _search_mode() == "channels":
+        hits = _search_channels(
+            query,
+            workspace_key=workspace_key,
+            since=since,
+            limit=limit,
+            query_vec=query_vec,
+            model=model,
+        )
+        if hits is not None:
+            return hits
 
     clauses: list[str] = []
     params: list[Any] = []
